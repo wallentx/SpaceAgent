@@ -1,15 +1,10 @@
 package com.example.ui.screens
 
-import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
-import android.view.ViewGroup
-import android.webkit.*
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
@@ -31,14 +26,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.example.ui.AppScreen
 import com.example.ui.SpaceAgentViewModel
+import com.example.ui.components.CodeBlockView
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.EmeraldSuccess
-import com.example.ui.theme.HfYellow
 
-@SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WebSpaceScreen(
@@ -49,12 +42,7 @@ fun WebSpaceScreen(
     val space by viewModel.selectedWebSpace.collectAsState()
     val isKeepAliveActive by viewModel.isKeepAliveActive.collectAsState()
 
-    var webView: WebView? by remember { mutableStateOf(null) }
-    var webProgress by remember { mutableIntStateOf(0) }
-    var isDesktopMode by remember { mutableStateOf(false) }
-    // Default to Native Gradio Playground to avoid heavy Chromium renderer memory spikes unless toggled
-    var useEmbeddedWebView by remember { mutableStateOf(false) }
-    var webErrorNotice by remember { mutableStateOf<String?>(null) }
+    var showApiInspector by remember { mutableStateOf(false) }
 
     // Interactive Native Playground states
     var interactiveInput by remember(space) {
@@ -64,30 +52,8 @@ fun WebSpaceScreen(
     var maxTokens by remember { mutableFloatStateOf(1024f) }
     var quickOutput by remember(space) { mutableStateOf<String?>(null) }
 
-    val currentUrl = remember(space) {
-        space?.directEmbedUrl ?: "https://huggingface.co/spaces"
-    }
-
-    val defaultDesktopUA =
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-    DisposableEffect(Unit) {
-        onDispose {
-            try {
-                webView?.stopLoading()
-                webView?.destroy()
-                webView = null
-            } catch (_: Exception) {
-            }
-        }
-    }
-
     BackHandler {
-        if (useEmbeddedWebView && webView?.canGoBack() == true) {
-            webView?.goBack()
-        } else {
-            viewModel.navigateTo(AppScreen.SPACES_BROWSER)
-        }
+        viewModel.navigateTo(AppScreen.SPACES_BROWSER)
     }
 
     if (space == null) {
@@ -175,26 +141,20 @@ fun WebSpaceScreen(
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         FilterChip(
-                            selected = !useEmbeddedWebView,
-                            onClick = {
-                                useEmbeddedWebView = false
-                                webErrorNotice = null
-                            },
-                            label = { Text("Native UI", fontSize = 11.sp) },
+                            selected = !showApiInspector,
+                            onClick = { showApiInspector = false },
+                            label = { Text("Interactive UI", fontSize = 11.sp) },
                             modifier = Modifier.testTag("native_ui_mode_chip")
                         )
 
                         FilterChip(
-                            selected = useEmbeddedWebView,
-                            onClick = {
-                                useEmbeddedWebView = true
-                                webErrorNotice = null
-                            },
-                            label = { Text("Web Embed", fontSize = 11.sp) },
-                            modifier = Modifier.testTag("web_embed_mode_chip")
+                            selected = showApiInspector,
+                            onClick = { showApiInspector = true },
+                            label = { Text("API & Client", fontSize = 11.sp) },
+                            modifier = Modifier.testTag("api_inspector_mode_chip")
                         )
 
                         IconButton(
@@ -221,9 +181,17 @@ fun WebSpaceScreen(
 
                         IconButton(
                             onClick = {
-                                val intent =
-                                    Intent(Intent.ACTION_VIEW, Uri.parse(currentSpace.hfWebUrl))
-                                context.startActivity(intent)
+                                try {
+                                    val intent =
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(currentSpace.hfWebUrl))
+                                    context.startActivity(intent)
+                                } catch (_: Exception) {
+                                    Toast.makeText(
+                                        context,
+                                        "Could not open external browser",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
                             },
                             modifier = Modifier.size(32.dp)
                         ) {
@@ -282,35 +250,8 @@ fun WebSpaceScreen(
             }
         }
 
-        // Web Renderer / SSL Fallback Notice if WebView encountered an issue
-        webErrorNotice?.let { notice ->
-            Surface(
-                color = Color(0xFF78350F),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = null,
-                        tint = HfYellow,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        text = notice,
-                        fontSize = 11.sp,
-                        color = Color.White,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-
-        if (!useEmbeddedWebView) {
-            // Native Gradio-Style Interactive Space Playground (Fast, Lightweight, Crash-Proof)
+        if (!showApiInspector) {
+            // Native Gradio-Style Interactive Space Playground
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -337,7 +278,7 @@ fun WebSpaceScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "INTERACTIVE GRADIO INTERFACE",
+                                text = "NATIVE GRADIO CONSOLE",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.Monospace,
@@ -508,100 +449,49 @@ fun WebSpaceScreen(
                 }
             }
         } else {
-            // Web Loading Progress Bar
-            if (webProgress in 1..99) {
-                LinearProgressIndicator(
-                    progress = { webProgress / 100f },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(3.dp),
-                    color = HfYellow,
-                    trackColor = Color.Transparent
-                )
-            }
-
-            // Embedded Space WebView with Renderer Crash & SSL Protection
-            AndroidView(
+            // API & Gradio Client Inspector
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .weight(1f)
-                    .testTag("space_webview"),
-                factory = { ctx ->
-                    WebView(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp)
+                    .testTag("space_api_inspector"),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    text = "Gradio API & Client Integration",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
 
-                        settings.apply {
-                            javaScriptEnabled = true
-                            domStorageEnabled = true
-                            databaseEnabled = true
-                            loadWithOverviewMode = true
-                            useWideViewPort = true
-                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                            cacheMode = WebSettings.LOAD_DEFAULT
-                            setSupportZoom(true)
-                            builtInZoomControls = true
-                            displayZoomControls = false
-                            userAgentString = if (isDesktopMode) defaultDesktopUA else null
-                        }
+                Text(
+                    text = "Use the snippets below or Agent Mode to invoke ${currentSpace.id} programmatically with persistent keep-alive.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-                        webViewClient = object : WebViewClient() {
-                            override fun onPageStarted(
-                                view: WebView?,
-                                url: String?,
-                                favicon: Bitmap?
-                            ) {
-                                super.onPageStarted(view, url, favicon)
-                            }
+                CodeBlockView(
+                    code = """
+from gradio_client import Client
 
-                            override fun onReceivedError(
-                                view: WebView?,
-                                request: WebResourceRequest?,
-                                error: WebResourceError?
-                            ) {
-                                super.onReceivedError(view, request, error)
-                                if (request?.isForMainFrame == true) {
-                                    webErrorNotice =
-                                        "Space web embed unreachable (${error?.description ?: "Network error"}). Switched to Native UI."
-                                    useEmbeddedWebView = false
-                                }
-                            }
+client = Client("${currentSpace.id}")
+result = client.predict(
+    prompt="${interactiveInput.replace("\"", "\\\"")}",
+    api_name="/predict"
+)
+print(result)
+                    """.trimIndent()
+                )
 
-                            override fun onRenderProcessGone(
-                                view: WebView?,
-                                detail: RenderProcessGoneDetail?
-                            ): Boolean {
-                                // Prevent Chromium renderer crash from terminating the host app
-                                try {
-                                    (view?.parent as? ViewGroup)?.removeView(view)
-                                    view?.destroy()
-                                } catch (_: Exception) {
-                                }
-                                webView = null
-                                webErrorNotice =
-                                    "Web renderer memory limit reached for this heavy Space. Switched to Native UI."
-                                useEmbeddedWebView = false
-                                return true
-                            }
-                        }
-
-                        webChromeClient = object : WebChromeClient() {
-                            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                                super.onProgressChanged(view, newProgress)
-                                webProgress = newProgress
-                            }
-                        }
-
-                        loadUrl(currentUrl)
-                        webView = this
-                    }
-                },
-                update = { view ->
-                    webView = view
-                }
-            )
+                CodeBlockView(
+                    code = """
+curl -X POST ${currentSpace.directEmbedUrl}/api/predict \
+  -H "Content-Type: application/json" \
+  -d '{"data": ["${interactiveInput.replace("\"", "\\\"")}", $temperature, ${maxTokens.toInt()}]}'
+                    """.trimIndent()
+                )
+            }
         }
     }
 }

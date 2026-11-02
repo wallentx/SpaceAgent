@@ -1,0 +1,97 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ "main", "master", "**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Assemble Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK Licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: wrapper
+
+      - name: Ensure debug.keystore exists for signingConfig
+        run: |
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Ensure .env file exists
+        run: |
+          if [ ! -f ".env" ] && [ -f ".env.example" ]; then
+            cp .env.example .env
+          fi
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK Artifact
+        id: upload-apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpaceAgent-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish APK Details to Run Summary
+        run: |
+          APK_PATH=$(ls app/build/outputs/apk/debug/*.apk | head -n 1)
+          APK_NAME=$(basename "$APK_PATH")
+          APK_SIZE=$(du -h "$APK_PATH" | cut -f1)
+          APK_SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+          ARTIFACT_URL="${{ steps.upload-apk.outputs.artifact-url }}"
+
+          {
+            echo "## 🤖 SpaceAgent Android APK Build Summary"
+            echo ""
+            echo "✅ **Build Status:** Succeeded"
+            echo ""
+            echo "| Property | Value |"
+            echo "| :--- | :--- |"
+            echo "| **Application ID** | \`com.aistudio.spaceagent.hfapp\` |"
+            echo "| **APK File** | \`${APK_NAME}\` |"
+            echo "| **File Size** | \`${APK_SIZE}\` |"
+            echo "| **SHA-256** | \`${APK_SHA256}\` |"
+            echo "| **Commit** | \`${GITHUB_SHA}\` |"
+            echo ""
+            if [ -n "$ARTIFACT_URL" ]; then
+              echo "### 📦 [⬇️ Download SpaceAgent-debug-apk](${ARTIFACT_URL})"
+            else
+              echo "### 📦 Artifact uploaded as \`SpaceAgent-debug-apk\` in the Artifacts section below."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
