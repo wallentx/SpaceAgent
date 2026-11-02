@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,11 +17,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.model.HfSpace
+import com.example.model.SpaceCategoryFilter
+import com.example.model.SpaceRuntimeFilter
+import com.example.model.SpaceSdkFilter
+import com.example.model.SpaceSortOption
 import com.example.ui.AppScreen
 import com.example.ui.SpaceAgentViewModel
 import com.example.ui.components.AntiTimeoutBanner
 import com.example.ui.components.SpaceCard
+import com.example.ui.theme.EmeraldSuccess
+import com.example.ui.theme.HfYellow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -30,56 +34,23 @@ fun SpacesListScreen(
     viewModel: SpaceAgentViewModel,
     modifier: Modifier = Modifier
 ) {
-    val localEntities by viewModel.localSpaces.collectAsState()
+    val liveSpaces by viewModel.liveSpaces.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
-    val selectedCategory by viewModel.selectedCategory.collectAsState()
-    val isSearchingHub by viewModel.isSearchingHub.collectAsState()
-    val hubResults by viewModel.hubSearchResults.collectAsState()
+    val selectedCategoryFilter by viewModel.selectedCategoryFilter.collectAsState()
+    val selectedSdkFilter by viewModel.selectedSdkFilter.collectAsState()
+    val selectedRuntimeFilter by viewModel.selectedRuntimeFilter.collectAsState()
+    val selectedSortOption by viewModel.selectedSortOption.collectAsState()
+    val isLoadingLiveSpaces by viewModel.isLoadingLiveSpaces.collectAsState()
+    val liveSyncStatus by viewModel.liveSyncStatus.collectAsState()
+
     val isRunning by viewModel.isTaskRunning.collectAsState()
     val isKeepAlive by viewModel.isKeepAliveActive.collectAsState()
     val activeSpaceName by viewModel.activeSpaceName.collectAsState()
 
     var showAddDialog by remember { mutableStateOf(false) }
     var customSpaceInput by remember { mutableStateOf("") }
-
-    // Map entities to domain HfSpace
-    val localSpaces = remember(localEntities) {
-        localEntities.map { entity ->
-            HfSpace(
-                id = entity.id,
-                author = entity.author,
-                name = entity.name,
-                title = entity.title,
-                description = entity.description,
-                sdk = entity.sdk,
-                category = entity.category,
-                likes = entity.likes,
-                endpointUrl = entity.endpointUrl,
-                isFavorite = entity.isFavorite,
-                isCurated = entity.isCurated,
-                demoPrompt = entity.demoPrompt
-            )
-        }
-    }
-
-    // Filter spaces
-    val displayedSpaces = remember(localSpaces, hubResults, searchQuery, selectedCategory) {
-        if (hubResults.isNotEmpty() && searchQuery.isNotBlank()) {
-            hubResults
-        } else {
-            localSpaces.filter { space ->
-                val matchesCategory = selectedCategory == "All" || space.category.equals(selectedCategory, ignoreCase = true)
-                val matchesSearch = searchQuery.isBlank() ||
-                        space.name.contains(searchQuery, ignoreCase = true) ||
-                        space.id.contains(searchQuery, ignoreCase = true) ||
-                        space.title.contains(searchQuery, ignoreCase = true) ||
-                        space.description.contains(searchQuery, ignoreCase = true)
-                matchesCategory && matchesSearch
-            }
-        }
-    }
-
-    val categories = listOf("All", "Reasoning", "Code", "Image", "Agent", "Audio")
+    var showSortMenu by remember { mutableStateOf(false) }
+    var showSdkMenu by remember { mutableStateOf(false) }
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -100,7 +71,7 @@ fun SpacesListScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Anti-Timeout ongoing banner if service is running
             if (isRunning || isKeepAlive) {
@@ -109,31 +80,71 @@ fun SpacesListScreen(
                     onOpenActiveTask = {
                         viewModel.navigateTo(AppScreen.AGENT_STUDIO)
                     },
-                    modifier = Modifier.padding(bottom = 12.dp)
+                    modifier = Modifier.padding(bottom = 10.dp)
                 )
             }
 
-            // Search Bar
+            // Live Feed Status Bar + Refresh Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (isLoadingLiveSpaces) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp,
+                            color = HfYellow
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Public,
+                            contentDescription = null,
+                            tint = EmeraldSuccess,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                    Text(
+                        text = liveSyncStatus,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                IconButton(
+                    onClick = { viewModel.refreshLiveSpaces(immediate = true) },
+                    modifier = Modifier
+                        .size(30.dp)
+                        .testTag("refresh_live_spaces_btn")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Refresh Live Spaces",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Live Search Bar
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { viewModel.setSearchQuery(it) },
-                placeholder = { Text("Search Spaces (e.g. Qwen, FLUX, DeepSeek)...") },
+                placeholder = { Text("Search Spaces on huggingface.co/spaces...") },
                 leadingIcon = {
                     Icon(imageVector = Icons.Outlined.Search, contentDescription = "Search")
                 },
                 trailingIcon = {
                     if (searchQuery.isNotBlank()) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = { viewModel.searchHub(searchQuery) }) {
-                                Icon(
-                                    imageVector = Icons.Default.CloudDownload,
-                                    contentDescription = "Search HF Hub",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            IconButton(onClick = { viewModel.setSearchQuery("") }) {
-                                Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear")
-                            }
+                        IconButton(onClick = { viewModel.setSearchQuery("") }) {
+                            Icon(imageVector = Icons.Default.Clear, contentDescription = "Clear")
                         }
                     }
                 },
@@ -144,49 +155,150 @@ fun SpacesListScreen(
                     .testTag("space_search_input")
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Category Filter Chips
+            // Task / Category Filter Pills (matching https://huggingface.co/spaces)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                categories.forEach { category ->
+                SpaceCategoryFilter.values().forEach { category ->
                     FilterChip(
-                        selected = selectedCategory == category,
-                        onClick = { viewModel.setCategory(category) },
-                        label = { Text(category) },
+                        selected = selectedCategoryFilter == category,
+                        onClick = { viewModel.setCategoryFilter(category) },
+                        label = {
+                            Text("${category.emoji} ${category.displayName}", fontSize = 12.sp)
+                        },
                         shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.testTag("category_chip_$category")
+                        modifier = Modifier.testTag("category_chip_${category.id}")
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            // Hub search indicator
-            if (isSearchingHub) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = "Searching Hugging Face Hub...",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            // Sort, SDK, and Runtime/Hardware Filter Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Sort Dropdown Button
+                Box {
+                    AssistChip(
+                        onClick = { showSortMenu = true },
+                        label = {
+                            Text(
+                                text = "Sort: ${selectedSortOption.badgeEmoji} ${selectedSortOption.displayName}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        },
+                        trailingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.ArrowDropDown,
+                                contentDescription = "Sort Options",
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.testTag("sort_dropdown_chip")
+                    )
+
+                    DropdownMenu(
+                        expanded = showSortMenu,
+                        onDismissRequest = { showSortMenu = false }
+                    ) {
+                        SpaceSortOption.values().forEach { sortOpt ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text("${sortOpt.badgeEmoji} ${sortOpt.displayName}")
+                                },
+                                onClick = {
+                                    viewModel.setSortOption(sortOpt)
+                                    showSortMenu = false
+                                },
+                                leadingIcon = {
+                                    if (selectedSortOption == sortOpt) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // SDK Filter Dropdown Button
+                Box {
+                    AssistChip(
+                        onClick = { showSdkMenu = true },
+                        label = {
+                            Text(
+                                text = "SDK: ${selectedSdkFilter.displayName}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        },
+                        trailingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.ArrowDropDown,
+                                contentDescription = "SDK Filter",
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.testTag("sdk_dropdown_chip")
+                    )
+
+                    DropdownMenu(
+                        expanded = showSdkMenu,
+                        onDismissRequest = { showSdkMenu = false }
+                    ) {
+                        SpaceSdkFilter.values().forEach { sdkOpt ->
+                            DropdownMenuItem(
+                                text = { Text(sdkOpt.displayName) },
+                                onClick = {
+                                    viewModel.setSdkFilter(sdkOpt)
+                                    showSdkMenu = false
+                                },
+                                leadingIcon = {
+                                    if (selectedSdkFilter == sdkOpt) {
+                                        Icon(
+                                            imageVector = Icons.Default.Check,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Runtime / Hardware / Saved Filter Chips
+                SpaceRuntimeFilter.values().forEach { runtimeOpt ->
+                    FilterChip(
+                        selected = selectedRuntimeFilter == runtimeOpt,
+                        onClick = { viewModel.setRuntimeFilter(runtimeOpt) },
+                        label = { Text(runtimeOpt.displayName, fontSize = 11.sp) },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.testTag("runtime_chip_${runtimeOpt.name}")
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Spaces List
-            if (displayedSpaces.isEmpty() && !isSearchingHub) {
+            if (liveSpaces.isEmpty() && !isLoadingLiveSpaces) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -195,28 +307,31 @@ fun SpacesListScreen(
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.SentimentDissatisfied,
+                            imageVector = Icons.Default.SearchOff,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(48.dp)
                         )
                         Text(
-                            text = "No Spaces found matching query",
+                            text = "No Spaces matched these filters",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
-                        if (searchQuery.isNotBlank()) {
-                            Button(
-                                onClick = { viewModel.searchHub(searchQuery) },
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Icon(imageVector = Icons.Default.CloudDownload, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Search Live on Hugging Face Hub")
-                            }
+                        Button(
+                            onClick = {
+                                viewModel.setSearchQuery("")
+                                viewModel.setCategoryFilter(SpaceCategoryFilter.ALL)
+                                viewModel.setSdkFilter(SpaceSdkFilter.ALL)
+                                viewModel.setRuntimeFilter(SpaceRuntimeFilter.ALL)
+                            },
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(imageVector = Icons.Default.FilterAltOff, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Reset Filters")
                         }
                     }
                 }
@@ -230,7 +345,7 @@ fun SpacesListScreen(
                     contentPadding = PaddingValues(bottom = 80.dp)
                 ) {
                     items(
-                        items = displayedSpaces,
+                        items = liveSpaces,
                         key = { it.id }
                     ) { space ->
                         SpaceCard(

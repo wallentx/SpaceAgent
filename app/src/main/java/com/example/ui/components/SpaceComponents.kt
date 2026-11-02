@@ -4,8 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -57,24 +55,31 @@ fun SpaceCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            // Header Row: Category Badge, SDK, and Favorite
+            // Top Row: Runtime Stage, ZeroGPU/Hardware, SDK, and Likes/Bookmark
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
                 ) {
+                    RuntimeStatusBadge(
+                        stage = space.runtimeStage,
+                        isZeroGpu = space.isZeroGpu
+                    )
+
                     CategoryChip(category = space.category)
+
                     Surface(
                         color = MaterialTheme.colorScheme.surface,
                         shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
                             text = space.sdk.uppercase(),
-                            fontSize = 11.sp,
+                            fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -83,30 +88,40 @@ fun SpaceCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (space.trendingScore > 0) {
+                        Text(
+                            text = "🔥${space.trendingScore}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = HfYellow,
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                    }
                     Icon(
                         imageVector = Icons.Default.Favorite,
                         contentDescription = "Likes",
                         tint = HfYellowVariant,
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(14.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(3.dp))
                     Text(
-                        text = "${space.likes}",
+                        text = formatCompactLikes(space.likes),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     IconButton(
                         onClick = { onToggleFavorite(space) },
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(30.dp)
                             .testTag("favorite_btn_${space.id.replace('/', '_')}")
                     ) {
                         Icon(
                             imageVector = if (space.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
                             contentDescription = "Bookmark Space",
-                            tint = if (space.isFavorite) HfYellow else MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = if (space.isFavorite) HfYellow else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
@@ -114,25 +129,42 @@ fun SpaceCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Space Title & Author
-            Text(
-                text = space.title,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                text = space.id,
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.secondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            // Space Emoji + Title & Author Repo ID
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(text = space.emoji, fontSize = 18.sp)
+                    }
+                }
 
-            Spacer(modifier = Modifier.height(6.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = space.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = space.id,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.secondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             Text(
                 text = space.description,
@@ -142,9 +174,9 @@ fun SpaceCard(
                 overflow = TextOverflow.Ellipsis
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // Action Buttons: Agent Mode (Primary) & Web View (Secondary)
+            // Action Buttons: Agent Mode (Primary) & Interactive Console (Secondary)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -179,7 +211,7 @@ fun SpaceCard(
                     contentPadding = PaddingValues(vertical = 10.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.OpenInBrowser,
+                        imageVector = Icons.Default.Terminal,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
@@ -191,15 +223,60 @@ fun SpaceCard(
     }
 }
 
+private fun formatCompactLikes(likes: Int): String {
+    return when {
+        likes >= 1000 -> String.format("%.1fk", likes / 1000.0)
+        else -> likes.toString()
+    }
+}
+
+@Composable
+fun RuntimeStatusBadge(stage: String, isZeroGpu: Boolean) {
+    val isRunning = stage.contains("RUNNING", ignoreCase = true)
+    val bgColor = when {
+        isZeroGpu -> HfYellow.copy(alpha = 0.2f)
+        isRunning -> EmeraldSuccess.copy(alpha = 0.2f)
+        else -> MaterialTheme.colorScheme.surface
+    }
+    val textColor = when {
+        isZeroGpu -> HfYellow
+        isRunning -> EmeraldSuccess
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val label = when {
+        isZeroGpu -> "⚡ ZeroGPU"
+        isRunning -> "🟢 Running"
+        stage.contains("BUILD", ignoreCase = true) -> "🔨 Building"
+        stage.contains("SLEEP", ignoreCase = true) -> "💤 Sleeping"
+        else -> stage.take(10)
+    }
+
+    Surface(
+        color = bgColor,
+        shape = RoundedCornerShape(6.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = textColor,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
+}
+
 @Composable
 fun CategoryChip(category: String) {
-    val (bgColor, textColor, emoji) = when (category) {
-        "Reasoning" -> Triple(Color(0xFF818CF8).copy(alpha = 0.2f), Color(0xFF818CF8), "🧠")
-        "Code" -> Triple(Color(0xFF38BDF8).copy(alpha = 0.2f), Color(0xFF38BDF8), "💻")
-        "Image" -> Triple(Color(0xFFF472B6).copy(alpha = 0.2f), Color(0xFFF472B6), "🎨")
-        "Audio" -> Triple(Color(0xFF34D399).copy(alpha = 0.2f), Color(0xFF34D399), "🎙️")
-        "Agent" -> Triple(Color(0xFFFBBF24).copy(alpha = 0.2f), Color(0xFFFBBF24), "🤖")
-        else -> Triple(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.onSurface, "⚡")
+    val catLower = category.lowercase()
+    val (bgColor, textColor, emoji) = when {
+        catLower.contains("reason") || catLower.contains("agent") -> Triple(Color(0xFF818CF8).copy(alpha = 0.2f), Color(0xFF818CF8), "🧠")
+        catLower.contains("code") -> Triple(Color(0xFF38BDF8).copy(alpha = 0.2f), Color(0xFF38BDF8), "💻")
+        catLower.contains("video") -> Triple(Color(0xFFF59E0B).copy(alpha = 0.2f), Color(0xFFF59E0B), "🎬")
+        catLower.contains("edit") -> Triple(Color(0xFFA855F7).copy(alpha = 0.2f), Color(0xFFA855F7), "🪄")
+        catLower.contains("image") -> Triple(Color(0xFFF472B6).copy(alpha = 0.2f), Color(0xFFF472B6), "🎨")
+        catLower.contains("3d") -> Triple(Color(0xFF2DD4BF).copy(alpha = 0.2f), Color(0xFF2DD4BF), "🧊")
+        catLower.contains("audio") || catLower.contains("speech") -> Triple(Color(0xFF34D399).copy(alpha = 0.2f), Color(0xFF34D399), "🎙️")
+        else -> Triple(MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.onSurface, "📝")
     }
 
     Surface(
@@ -207,16 +284,17 @@ fun CategoryChip(category: String) {
         shape = RoundedCornerShape(6.dp)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+            horizontalArrangement = Arrangement.spacedBy(3.dp)
         ) {
-            Text(text = emoji, fontSize = 11.sp)
+            Text(text = emoji, fontSize = 10.sp)
             Text(
                 text = category,
-                fontSize = 11.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = textColor
+                color = textColor,
+                maxLines = 1
             )
         }
     }

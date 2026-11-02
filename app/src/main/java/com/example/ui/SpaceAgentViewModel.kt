@@ -9,12 +9,19 @@ import com.example.data.SpaceDatabase
 import com.example.data.SpaceEntity
 import com.example.model.AgentType
 import com.example.model.HfSpace
+import com.example.model.SpaceCategoryFilter
+import com.example.model.SpaceRuntimeFilter
+import com.example.model.SpaceSdkFilter
+import com.example.model.SpaceSortOption
 import com.example.network.HfApiClient
 import com.example.service.ExecutionManager
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -58,18 +65,32 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     private val _agentGoalPrompt = MutableStateFlow("Analyze and solve: If 5 machines take 5 minutes to make 5 widgets, how long will 100 machines take to make 100 widgets?")
     val agentGoalPrompt: StateFlow<String> = _agentGoalPrompt.asStateFlow()
 
-    // Space Browser State
+    // Live Hugging Face Spaces Browser State (mirrors https://huggingface.co/spaces)
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    private val _selectedCategory = MutableStateFlow("All")
-    val selectedCategory: StateFlow<String> = _selectedCategory.asStateFlow()
+    private val _selectedCategoryFilter = MutableStateFlow(SpaceCategoryFilter.ALL)
+    val selectedCategoryFilter: StateFlow<SpaceCategoryFilter> = _selectedCategoryFilter.asStateFlow()
 
-    private val _isSearchingHub = MutableStateFlow(false)
-    val isSearchingHub: StateFlow<Boolean> = _isSearchingHub.asStateFlow()
+    private val _selectedSdkFilter = MutableStateFlow(SpaceSdkFilter.ALL)
+    val selectedSdkFilter: StateFlow<SpaceSdkFilter> = _selectedSdkFilter.asStateFlow()
 
-    private val _hubSearchResults = MutableStateFlow<List<HfSpace>>(emptyList())
-    val hubSearchResults: StateFlow<List<HfSpace>> = _hubSearchResults.asStateFlow()
+    private val _selectedRuntimeFilter = MutableStateFlow(SpaceRuntimeFilter.ALL)
+    val selectedRuntimeFilter: StateFlow<SpaceRuntimeFilter> = _selectedRuntimeFilter.asStateFlow()
+
+    private val _selectedSortOption = MutableStateFlow(SpaceSortOption.TRENDING)
+    val selectedSortOption: StateFlow<SpaceSortOption> = _selectedSortOption.asStateFlow()
+
+    private val _isLoadingLiveSpaces = MutableStateFlow(false)
+    val isLoadingLiveSpaces: StateFlow<Boolean> = _isLoadingLiveSpaces.asStateFlow()
+
+    private val _liveSpaces = MutableStateFlow<List<HfSpace>>(emptyList())
+    val liveSpaces: StateFlow<List<HfSpace>> = _liveSpaces.asStateFlow()
+
+    private val _liveSyncStatus = MutableStateFlow("Syncing live with huggingface.co/spaces...")
+    val liveSyncStatus: StateFlow<String> = _liveSyncStatus.asStateFlow()
+
+    private var fetchJob: Job? = null
 
     // Database Flows
     val localSpaces: StateFlow<List<SpaceEntity>> = spaceDao.getAllSpaces().stateIn(
@@ -94,6 +115,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     init {
         seedCuratedSpacesIfEmpty()
+        refreshLiveSpaces(immediate = true)
     }
 
     private fun seedCuratedSpacesIfEmpty() {
@@ -120,6 +142,131 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun refreshLiveSpaces(immediate: Boolean = true) {
+        fetchJob?.cancel()
+        fetchJob = viewModelScope.launch {
+            if (!immediate) {
+                delay(350) // Debounce live search typing
+            }
+            _isLoadingLiveSpaces.value = true
+            _liveSyncStatus.value = "Fetching live from huggingface.co/spaces..."
+
+            val savedEntities = try {
+                spaceDao.getAllSpaces().first()
+            } catch (_: Exception) {
+                emptyList()
+            }
+            val favoriteIds = savedEntities.filter { it.isFavorite }.map { it.id }.toSet()
+
+            // If user filtered strictly to Saved spaces and has no query, show saved spaces merged with live
+            if (_selectedRuntimeFilter.value == SpaceRuntimeFilter.SAVED && _searchQuery.value.isBlank()) {
+                val savedSpaces = savedEntities.filter { it.isFavorite }.map { e ->
+                    HfSpace(
+                        id = e.id,
+                        author = e.author,
+                        name = e.name,
+                        title = e.title,
+                        description = e.description,
+                        sdk = e.sdk,
+                        category = e.category,
+                        likes = e.likes,
+                        endpointUrl = e.endpointUrl,
+                        isFavorite = true,
+                        isCurated = e.isCurated,
+                        demoPrompt = e.demoPrompt
+                    )
+                }
+                _liveSpaces.value = savedSpaces
+                _isLoadingLiveSpaces.value = false
+                _liveSyncStatus.value = "Showing ${savedSpaces.size} saved Spaces"
+                return@launch
+            }
+
+            val result = apiClient.fetchLiveSpaces(
+                query = _searchQuery.value,
+                categoryFilter = _selectedCategoryFilter.value,
+                sdkFilter = _selectedSdkFilter.value,
+                runtimeFilter = _selectedRuntimeFilter.value,
+                sortOption = _selectedSortOption.value,
+                favoriteIds = favoriteIds,
+                limit = 50
+            )
+
+            result.onSuccess { fetched ->
+                _liveSpaces.value = fetched
+                _liveSyncStatus.value = "Live • ${fetched.size} Spaces from huggingface.co/spaces"
+                // Cache top fetched spaces into local DB so Agent picker also has them
+                val toCache = fetched.take(15).map { s ->
+                    SpaceEntity(
+                        id = s.id,
+                        author = s.author,
+                        name = s.name,
+                        title = s.title,
+                        description = s.description,
+                        sdk = s.sdk,
+                        category = s.category,
+                        likes = s.likes,
+                        endpointUrl = s.endpointUrl,
+                        isFavorite = favoriteIds.contains(s.id),
+                        isCurated = false,
+                        demoPrompt = s.demoPrompt
+                    )
+                }
+                try {
+                    spaceDao.insertSpaces(toCache)
+                } catch (_: Exception) {}
+            }.onFailure { err ->
+                // Fallback to cached local spaces if offline
+                if (_liveSpaces.value.isEmpty()) {
+                    _liveSpaces.value = savedEntities.map { e ->
+                        HfSpace(
+                            id = e.id,
+                            author = e.author,
+                            name = e.name,
+                            title = e.title,
+                            description = e.description,
+                            sdk = e.sdk,
+                            category = e.category,
+                            likes = e.likes,
+                            endpointUrl = e.endpointUrl,
+                            isFavorite = e.isFavorite,
+                            isCurated = e.isCurated,
+                            demoPrompt = e.demoPrompt
+                        )
+                    }.ifEmpty { apiClient.getCuratedSpaces() }
+                }
+                _liveSyncStatus.value = "Offline fallback (${err.message ?: "check connection"})"
+            }
+
+            _isLoadingLiveSpaces.value = false
+        }
+    }
+
+    fun setSearchQuery(query: String) {
+        _searchQuery.value = query
+        refreshLiveSpaces(immediate = false)
+    }
+
+    fun setCategoryFilter(filter: SpaceCategoryFilter) {
+        _selectedCategoryFilter.value = filter
+        refreshLiveSpaces(immediate = true)
+    }
+
+    fun setSdkFilter(filter: SpaceSdkFilter) {
+        _selectedSdkFilter.value = filter
+        refreshLiveSpaces(immediate = true)
+    }
+
+    fun setRuntimeFilter(filter: SpaceRuntimeFilter) {
+        _selectedRuntimeFilter.value = filter
+        refreshLiveSpaces(immediate = true)
+    }
+
+    fun setSortOption(sortOption: SpaceSortOption) {
+        _selectedSortOption.value = sortOption
+        refreshLiveSpaces(immediate = true)
+    }
+
     fun navigateTo(screen: AppScreen) {
         _currentScreen.value = screen
     }
@@ -131,11 +278,11 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     fun openSpaceInAgent(space: HfSpace) {
         _selectedSpaceForAgent.value = space
-        // Auto-match agent type to space category
-        _selectedAgentType.value = when (space.category) {
-            "Reasoning" -> AgentType.REASONING
-            "Code" -> AgentType.CODER
-            "Image" -> AgentType.IMAGE_STUDIO
+        val catLower = space.category.lowercase()
+        _selectedAgentType.value = when {
+            catLower.contains("reason") || catLower.contains("agent") -> AgentType.REASONING
+            catLower.contains("code") -> AgentType.CODER
+            catLower.contains("image") || catLower.contains("video") || catLower.contains("3d") -> AgentType.IMAGE_STUDIO
             else -> AgentType.GENERAL
         }
         if (space.demoPrompt.isNotBlank()) {
@@ -146,7 +293,6 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     fun setAgentType(type: AgentType) {
         _selectedAgentType.value = type
-        // Recommend a space for this agent type
         val currentSpace = _selectedSpaceForAgent.value
         val spaces = apiClient.getCuratedSpaces()
         val matching = spaces.firstOrNull { it.id == type.defaultSpaceId }
@@ -188,35 +334,34 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
         ExecutionManager.toggleWebViewKeepAlive(context, currentSpace.title, !currentKeepAlive)
     }
 
-    fun setSearchQuery(query: String) {
-        _searchQuery.value = query
-        if (query.isBlank()) {
-            _hubSearchResults.value = emptyList()
-        }
-    }
-
-    fun setCategory(category: String) {
-        _selectedCategory.value = category
-    }
-
-    fun searchHub(query: String) {
-        if (query.isBlank()) return
-        _isSearchingHub.value = true
-        viewModelScope.launch {
-            try {
-                val results = apiClient.searchSpaces(query)
-                _hubSearchResults.value = results
-            } catch (_: Exception) {
-                _hubSearchResults.value = emptyList()
-            } finally {
-                _isSearchingHub.value = false
-            }
-        }
-    }
-
     fun toggleFavorite(space: HfSpace) {
+        val newFav = !space.isFavorite
+        // Optimistically update in live list
+        _liveSpaces.value = _liveSpaces.value.map {
+            if (it.id == space.id) it.copy(isFavorite = newFav) else it
+        }
         viewModelScope.launch {
-            spaceDao.setFavorite(space.id, !space.isFavorite)
+            val existing = spaceDao.getSpaceById(space.id)
+            if (existing != null) {
+                spaceDao.setFavorite(space.id, newFav)
+            } else {
+                spaceDao.insertSpace(
+                    SpaceEntity(
+                        id = space.id,
+                        author = space.author,
+                        name = space.name,
+                        title = space.title,
+                        description = space.description,
+                        sdk = space.sdk,
+                        category = space.category,
+                        likes = space.likes,
+                        endpointUrl = space.endpointUrl,
+                        isFavorite = newFav,
+                        isCurated = false,
+                        demoPrompt = space.demoPrompt
+                    )
+                )
+            }
         }
     }
 
@@ -237,21 +382,37 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
                 val parts = cleanId.split("/")
                 val author = parts[0]
                 val name = parts[1]
-                val entity = SpaceEntity(
+                val newSpace = HfSpace(
                     id = cleanId,
                     author = author,
                     name = name,
                     title = name.replace("-", " ").replace("_", " "),
                     description = "Custom Space added by user ($cleanId)",
                     sdk = "gradio",
-                    category = "General",
+                    category = "Text Generation",
                     likes = 1,
                     endpointUrl = HfSpace.toSanitizedSpaceEndpoint(cleanId),
                     isFavorite = true,
                     isCurated = false,
                     demoPrompt = "Run an agent task on $cleanId"
                 )
-                spaceDao.insertSpace(entity)
+                spaceDao.insertSpace(
+                    SpaceEntity(
+                        id = newSpace.id,
+                        author = newSpace.author,
+                        name = newSpace.name,
+                        title = newSpace.title,
+                        description = newSpace.description,
+                        sdk = newSpace.sdk,
+                        category = newSpace.category,
+                        likes = newSpace.likes,
+                        endpointUrl = newSpace.endpointUrl,
+                        isFavorite = true,
+                        isCurated = false,
+                        demoPrompt = newSpace.demoPrompt
+                    )
+                )
+                _liveSpaces.value = listOf(newSpace) + _liveSpaces.value.filterNot { it.id == newSpace.id }
             }
         }
     }
@@ -259,6 +420,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     fun setHfToken(token: String) {
         _hfToken.value = token
         prefs.edit().putString("hf_api_token", token).apply()
+        refreshLiveSpaces(immediate = true)
     }
 
     fun selectHistorySession(session: AgentSessionEntity?) {

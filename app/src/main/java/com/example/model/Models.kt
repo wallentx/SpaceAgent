@@ -23,6 +23,45 @@ enum class AgentType(val displayName: String, val iconEmoji: String, val default
     )
 }
 
+enum class SpaceSortOption(val apiSortKey: String, val displayName: String, val badgeEmoji: String) {
+    TRENDING("trendingScore", "Trending", "🔥"),
+    LIKES("likes", "Most Likes", "❤️"),
+    RECENTLY_UPDATED("lastModified", "Recently Updated", "🕒"),
+    RECENTLY_CREATED("createdAt", "Recently Created", "✨")
+}
+
+enum class SpaceCategoryFilter(
+    val id: String,
+    val displayName: String,
+    val emoji: String,
+    val searchKeywords: String
+) {
+    ALL("all", "All Spaces", "🌐", ""),
+    IMAGE_GEN("image-generation", "Image Generation", "🎨", "flux image generation text-to-image"),
+    VIDEO_GEN("video-generation", "Video Generation", "🎬", "video generation text-to-video"),
+    TEXT_GEN("text-generation", "Text Generation", "📝", "chat llm text generation"),
+    AUDIO_SPEECH("audio", "Audio & Speech", "🎙️", "tts audio speech whisper"),
+    IMAGE_EDIT("image-editing", "Image Editing", "🪄", "image editing upscale background"),
+    MODEL_3D("3d", "3D Modeling", "🧊", "3d mesh trellis"),
+    AGENTS("agents", "Agents & Reasoning", "🧠", "agent reasoning deepseek"),
+    CODE("code", "Code & Dev", "💻", "coder code qwen")
+}
+
+enum class SpaceSdkFilter(val sdkKey: String, val displayName: String) {
+    ALL("", "All SDKs"),
+    GRADIO("gradio", "Gradio"),
+    STREAMLIT("streamlit", "Streamlit"),
+    DOCKER("docker", "Docker"),
+    STATIC("static", "Static")
+}
+
+enum class SpaceRuntimeFilter(val displayName: String) {
+    ALL("All Status"),
+    RUNNING_ONLY("🟢 Running"),
+    ZERO_GPU("⚡ ZeroGPU / GPU"),
+    SAVED("★ Saved")
+}
+
 enum class StepStatus {
     PENDING,
     RUNNING,
@@ -62,7 +101,13 @@ data class HfSpace(
     val endpointUrl: String,
     val isFavorite: Boolean = false,
     val isCurated: Boolean = false,
-    val demoPrompt: String = ""
+    val demoPrompt: String = "",
+    val emoji: String = "🚀",
+    val runtimeStage: String = "RUNNING",
+    val hardwareTier: String = "cpu-basic",
+    val trendingScore: Int = 0,
+    val lastModified: String = "",
+    val isZeroGpu: Boolean = false
 ) {
     val hfWebUrl: String
         get() = "https://huggingface.co/spaces/$id"
