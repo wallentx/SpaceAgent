@@ -1,0 +1,6 @@
+{
+  "name": "SpaceAgent",
+  "description": "Front-end to Hugging Face Spaces with background agent execution that never times out when switching apps.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
