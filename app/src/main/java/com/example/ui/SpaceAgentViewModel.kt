@@ -439,7 +439,9 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
             } finally {
                 if (requestId == interactiveRequestId) _isInteractiveExecuting.value = false
             }
-        }.invokeOnCompletion { InputUriAccess.release(executionInputOwner) }
+        }.also { job ->
+            job.invokeOnCompletion { InputUriAccess.release(executionInputOwner) }
+        }
     }
 
     fun cancelInteractiveExecution() {
