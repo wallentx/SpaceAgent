@@ -2,15 +2,17 @@ package com.example.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.view.View
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import com.example.R
@@ -30,7 +32,7 @@ import java.io.File
 @Config(sdk = [36], qualifiers = "w411dp-h891dp-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class SpaceResultUiTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test fun imageResultHasPreviewAndSaveActionInsteadOfRawMetadata() {
         val context = ApplicationProvider.getApplicationContext<Context>()
@@ -86,8 +88,22 @@ class SpaceResultUiTest {
     private fun capture(name: String) {
         val directory = File(checkNotNull(System.getProperty("spaceagent.screenshotDir")))
         directory.mkdirs()
-        File(directory, name).outputStream().use {
-            assertTrue(compose.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it))
+        // A headless Robolectric window has no PixelCopy surface callback. Draw the
+        // already-laid-out Android content view on its UI thread instead.
+        var bitmap: Bitmap? = null
+        compose.runOnIdle {
+            val view = compose.activity.findViewById<View>(android.R.id.content)
+            bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also {
+                view.draw(Canvas(it))
+            }
+        }
+        val captured = checkNotNull(bitmap)
+        try {
+            File(directory, name).outputStream().use {
+                assertTrue(captured.compress(Bitmap.CompressFormat.PNG, 100, it))
+            }
+        } finally {
+            captured.recycle()
         }
     }
 }
