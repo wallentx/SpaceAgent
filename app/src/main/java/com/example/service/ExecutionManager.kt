@@ -10,6 +10,7 @@ import com.example.model.AgentStep
 import com.example.model.AgentType
 import com.example.model.HfSpace
 import com.example.model.SessionStatus
+import com.example.model.SpaceInputValue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,13 +48,21 @@ object ExecutionManager {
         context: Context,
         goal: String,
         agentType: AgentType,
-        space: HfSpace
+        space: HfSpace,
+        apiName: String = "predict",
+        inputs: List<SpaceInputValue> = emptyList()
     ): String {
         val sessionId = UUID.randomUUID().toString()
+        val summaryGoal = if (goal.isNotBlank()) {
+            goal
+        } else {
+            inputs.joinToString(" | ") { it.toDisplaySummary() }.ifBlank { "Run ${space.title} (/$apiName)" }
+        }
+
         val session = AgentSessionEntity(
             id = sessionId,
-            title = goal.take(45) + if (goal.length > 45) "..." else "",
-            goal = goal,
+            title = summaryGoal.take(45) + if (summaryGoal.length > 45) "..." else "",
+            goal = summaryGoal,
             spaceId = space.id,
             spaceTitle = space.title,
             agentType = agentType.name,
@@ -65,7 +74,7 @@ object ExecutionManager {
         _isRunning.value = true
         _activeSpaceName.value = space.title
         _currentSteps.value = emptyList()
-        _liveLogs.value = listOf("Initializing background execution service...")
+        _liveLogs.value = listOf("Initializing background execution service for ${space.id} (/$apiName)...")
 
         // Save session in database immediately
         scope.launch {
@@ -76,15 +85,19 @@ object ExecutionManager {
             }
         }
 
+        val inputsJson = SpaceInputValue.listToJsonString(inputs)
+
         // Start Foreground Service so switching away or locking the screen never causes timeouts!
         val intent = Intent(context, SpaceAgentExecutionService::class.java).apply {
             action = SpaceAgentExecutionService.ACTION_START_AGENT_TASK
             putExtra(SpaceAgentExecutionService.EXTRA_SESSION_ID, sessionId)
-            putExtra(SpaceAgentExecutionService.EXTRA_GOAL, goal)
+            putExtra(SpaceAgentExecutionService.EXTRA_GOAL, summaryGoal)
             putExtra(SpaceAgentExecutionService.EXTRA_AGENT_TYPE, agentType.name)
             putExtra(SpaceAgentExecutionService.EXTRA_SPACE_ID, space.id)
             putExtra(SpaceAgentExecutionService.EXTRA_SPACE_NAME, space.title)
             putExtra(SpaceAgentExecutionService.EXTRA_SPACE_URL, space.endpointUrl)
+            putExtra(SpaceAgentExecutionService.EXTRA_API_NAME, apiName)
+            putExtra(SpaceAgentExecutionService.EXTRA_INPUTS_JSON, inputsJson)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -159,7 +172,6 @@ object ExecutionManager {
         val current = _currentSession.value ?: return
         _isRunning.value = false
 
-        // Serialize steps to JSON
         val stepsArray = JSONArray()
         for (s in steps) {
             val obj = JSONObject()

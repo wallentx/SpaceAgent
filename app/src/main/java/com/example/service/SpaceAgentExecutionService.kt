@@ -16,9 +16,9 @@ import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.agent.SpaceAgentEngine
-import com.example.model.AgentStep
 import com.example.model.AgentType
 import com.example.model.HfSpace
+import com.example.model.SpaceInputValue
 import com.example.network.HfApiClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +50,8 @@ class SpaceAgentExecutionService : Service() {
         const val EXTRA_SPACE_ID = "extra_space_id"
         const val EXTRA_SPACE_NAME = "extra_space_name"
         const val EXTRA_SPACE_URL = "extra_space_url"
+        const val EXTRA_API_NAME = "extra_api_name"
+        const val EXTRA_INPUTS_JSON = "extra_inputs_json"
     }
 
     override fun onCreate() {
@@ -82,6 +84,9 @@ class SpaceAgentExecutionService : Service() {
                 val spaceId = intent.getStringExtra(EXTRA_SPACE_ID) ?: "deepseek-ai/DeepSeek-R1"
                 val spaceName = intent.getStringExtra(EXTRA_SPACE_NAME) ?: "HF Space"
                 val spaceUrl = intent.getStringExtra(EXTRA_SPACE_URL) ?: "https://huggingface.co/spaces/$spaceId"
+                val apiName = intent.getStringExtra(EXTRA_API_NAME) ?: "predict"
+                val inputsJson = intent.getStringExtra(EXTRA_INPUTS_JSON)
+                val inputs = SpaceInputValue.listFromJsonString(inputsJson)
 
                 val agentType = try {
                     AgentType.valueOf(agentTypeName)
@@ -106,7 +111,7 @@ class SpaceAgentExecutionService : Service() {
                     buildOngoingNotification("Agent Mode: Initializing $spaceName...", "Preparing execution plan")
                 )
 
-                runAgentTask(goal, agentType, space)
+                runAgentTask(goal, agentType, space, apiName, inputs)
             }
 
             ACTION_START_KEEP_ALIVE -> {
@@ -140,7 +145,13 @@ class SpaceAgentExecutionService : Service() {
         }
     }
 
-    private fun runAgentTask(goal: String, agentType: AgentType, space: HfSpace) {
+    private fun runAgentTask(
+        goal: String,
+        agentType: AgentType,
+        space: HfSpace,
+        apiName: String,
+        inputs: List<SpaceInputValue>
+    ) {
         serviceScope.launch {
             val sharedPrefs = getSharedPreferences("space_agent_prefs", Context.MODE_PRIVATE)
             val token = sharedPrefs.getString("hf_api_token", null)
@@ -150,10 +161,13 @@ class SpaceAgentExecutionService : Service() {
 
             try {
                 val result = engine.executeAgentTask(
+                    context = applicationContext,
                     goal = goal,
                     agentType = agentType,
                     space = space,
-                    onStepUpdate = { stepIndex, step ->
+                    apiName = apiName,
+                    inputs = inputs,
+                    onStepUpdate = { _, step ->
                         ExecutionManager.updateSteps(
                             ExecutionManager.currentSteps.value.toMutableList().apply {
                                 val idx = indexOfFirst { it.stepNumber == step.stepNumber }
@@ -178,7 +192,6 @@ class SpaceAgentExecutionService : Service() {
                     durationMs = result.executionTimeMs
                 )
 
-                // Show high-priority completion notification so user knows result is ready
                 showCompletionNotification(
                     title = "🎉 Task Completed on ${space.name}!",
                     text = "Goal finished: ${goal.take(50)}... Tap to view results."
@@ -241,7 +254,7 @@ class SpaceAgentExecutionService : Service() {
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setProgress(0, 0, true) // Indeterminate animation
+            .setProgress(0, 0, true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()

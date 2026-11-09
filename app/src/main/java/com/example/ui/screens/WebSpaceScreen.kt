@@ -26,9 +26,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.SpaceInputType
 import com.example.ui.AppScreen
 import com.example.ui.SpaceAgentViewModel
 import com.example.ui.components.CodeBlockView
+import com.example.ui.components.DynamicSpaceInputsSection
 import com.example.ui.theme.CyanAccent
 import com.example.ui.theme.EmeraldSuccess
 
@@ -41,16 +43,11 @@ fun WebSpaceScreen(
     val context = LocalContext.current
     val space by viewModel.selectedWebSpace.collectAsState()
     val isKeepAliveActive by viewModel.isKeepAliveActive.collectAsState()
+    val inputValues by viewModel.currentInputValues.collectAsState()
+    val interactiveOutput by viewModel.interactiveOutput.collectAsState()
+    val isInteractiveExecuting by viewModel.isInteractiveExecuting.collectAsState()
 
     var showApiInspector by remember { mutableStateOf(false) }
-
-    // Interactive Native Playground states
-    var interactiveInput by remember(space) {
-        mutableStateOf(space?.demoPrompt?.ifBlank { "Test input for ${space?.title ?: "Space"}" } ?: "")
-    }
-    var temperature by remember { mutableFloatStateOf(0.7f) }
-    var maxTokens by remember { mutableFloatStateOf(1024f) }
-    var quickOutput by remember(space) { mutableStateOf<String?>(null) }
 
     BackHandler {
         viewModel.navigateTo(AppScreen.SPACES_BROWSER)
@@ -64,6 +61,7 @@ fun WebSpaceScreen(
     }
 
     val currentSpace = space!!
+    val currentApiName = viewModel.getCurrentApiName()
 
     Column(
         modifier = modifier
@@ -99,7 +97,7 @@ fun WebSpaceScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = currentSpace.title,
+                            text = "${currentSpace.emoji} ${currentSpace.title}",
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp,
                             maxLines = 1,
@@ -116,7 +114,7 @@ fun WebSpaceScreen(
 
                     // Launch in Agent Mode Button
                     FilledTonalButton(
-                        onClick = { viewModel.openSpaceInAgent(currentSpace) },
+                        onClick = { viewModel.navigateTo(AppScreen.AGENT_STUDIO) },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.testTag("web_to_agent_btn")
@@ -146,7 +144,7 @@ fun WebSpaceScreen(
                         FilterChip(
                             selected = !showApiInspector,
                             onClick = { showApiInspector = false },
-                            label = { Text("Interactive UI", fontSize = 11.sp) },
+                            label = { Text("1:1 Space UI", fontSize = 11.sp) },
                             modifier = Modifier.testTag("native_ui_mode_chip")
                         )
 
@@ -251,7 +249,7 @@ fun WebSpaceScreen(
         }
 
         if (!showApiInspector) {
-            // Native Gradio-Style Interactive Space Playground
+            // 1:1 Native Interactive Space Playground with full File/Video/Image/Audio Upload & Multi-Input Support
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -270,7 +268,7 @@ fun WebSpaceScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -285,7 +283,7 @@ fun WebSpaceScreen(
                                 color = CyanAccent
                             )
                             Text(
-                                text = "SDK: ${currentSpace.sdk.uppercase()}",
+                                text = "SDK: ${currentSpace.sdk.uppercase()} • ${currentSpace.hardwareTier}",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -299,7 +297,7 @@ fun WebSpaceScreen(
                         )
 
                         Text(
-                            text = "Endpoint: ${currentSpace.directEmbedUrl}",
+                            text = "Host: ${currentSpace.directEmbedUrl}",
                             fontSize = 11.sp,
                             fontFamily = FontFamily.Monospace,
                             color = MaterialTheme.colorScheme.secondary
@@ -307,118 +305,56 @@ fun WebSpaceScreen(
                     }
                 }
 
-                // Input Parameters Card
-                Card(
+                // 1:1 Dynamic Space Inputs (Video, Image, Audio, File Uploaders, Sliders, Dropdowns, Toggles, Text)
+                DynamicSpaceInputsSection(viewModel = viewModel)
+
+                // Submit to Space / Run in Agent Mode Action Buttons
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Column(
+                    Button(
+                        onClick = { viewModel.executeInteractiveSpaceCall(context) },
+                        enabled = !isInteractiveExecuting,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("interactive_submit_btn"),
+                        shape = RoundedCornerShape(10.dp)
                     ) {
-                        Text(
-                            text = "Space Input Payload",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        OutlinedTextField(
-                            value = interactiveInput,
-                            onValueChange = { interactiveInput = it },
-                            label = { Text("Prompt / Input Data") },
-                            minLines = 3,
-                            maxLines = 6,
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("interactive_prompt_input")
-                        )
-
-                        // Parameter Sliders
-                        Column {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Temperature", fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                                Text(
-                                    text = String.format("%.2f", temperature),
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            Slider(
-                                value = temperature,
-                                onValueChange = { temperature = it },
-                                valueRange = 0.0f..1.5f
+                        if (isInteractiveExecuting) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(16.dp)
                             )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Running...", fontWeight = FontWeight.Bold)
+                        } else {
+                            Icon(imageVector = Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Submit (${inputValues.size} Inputs)", fontWeight = FontWeight.Bold)
                         }
+                    }
 
-                        Column {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("Max Output Tokens", fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                                Text(
-                                    text = "${maxTokens.toInt()}",
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            Slider(
-                                value = maxTokens,
-                                onValueChange = { maxTokens = it },
-                                valueRange = 128f..4096f
-                            )
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Button(
-                                onClick = {
-                                    quickOutput = "Executed direct call on ${currentSpace.id}\n" +
-                                            "• Temperature: ${String.format("%.2f", temperature)}\n" +
-                                            "• Max Tokens: ${maxTokens.toInt()}\n" +
-                                            "• Endpoint: ${currentSpace.directEmbedUrl}/api/predict\n\n" +
-                                            "Response for \"${interactiveInput.take(80)}\":\n" +
-                                            "Space inference verified. For full multi-step autonomous execution with background WakeLock, tap 'Run in Agent Mode'."
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("interactive_submit_btn"),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Icon(imageVector = Icons.Default.Send, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Submit to Space", fontWeight = FontWeight.Bold)
-                            }
-
-                            OutlinedButton(
-                                onClick = {
-                                    viewModel.setAgentPrompt(interactiveInput)
-                                    viewModel.openSpaceInAgent(currentSpace)
-                                },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Icon(imageVector = Icons.Default.SmartToy, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Run in Agent Mode")
-                            }
-                        }
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.startAgentExecution(context)
+                            viewModel.navigateTo(AppScreen.AGENT_STUDIO)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.SmartToy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Run in Agent Mode")
                     }
                 }
 
                 // Output Result Box
-                quickOutput?.let { out ->
+                interactiveOutput?.let { out ->
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(14.dp),
@@ -431,7 +367,7 @@ fun WebSpaceScreen(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                text = "SPACE OUTPUT",
+                                text = "SPACE EXECUTION OUTPUT (/$currentApiName)",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.Monospace,
@@ -447,9 +383,28 @@ fun WebSpaceScreen(
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(32.dp))
             }
         } else {
-            // API & Gradio Client Inspector
+            // API & Gradio Client Inspector reflecting exact 1:1 Space parameters
+            val pythonArgs = inputValues.joinToString(",\n    ") { iv ->
+                when (iv.inputType) {
+                    SpaceInputType.VIDEO, SpaceInputType.IMAGE, SpaceInputType.AUDIO, SpaceInputType.FILE -> {
+                        "${iv.paramName}=handle_file(\"${iv.fileName ?: "sample_media.mp4"}\")"
+                    }
+                    SpaceInputType.SLIDER, SpaceInputType.NUMBER -> {
+                        "${iv.paramName}=${iv.numberValue}"
+                    }
+                    SpaceInputType.BOOLEAN -> {
+                        "${iv.paramName}=${if (iv.booleanValue) "True" else "False"}"
+                    }
+                    else -> {
+                        "${iv.paramName}=\"${iv.textValue.replace("\"", "\\\"")}\""
+                    }
+                }
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -460,35 +415,27 @@ fun WebSpaceScreen(
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Text(
-                    text = "Gradio API & Client Integration",
+                    text = "1:1 Gradio API & Client Integration",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
 
                 Text(
-                    text = "Use the snippets below or Agent Mode to invoke ${currentSpace.id} programmatically with persistent keep-alive.",
+                    text = "Generated directly from ${currentSpace.id}'s 1:1 parameter schema (/$currentApiName).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 CodeBlockView(
                     code = """
-from gradio_client import Client
+from gradio_client import Client, handle_file
 
 client = Client("${currentSpace.id}")
 result = client.predict(
-    prompt="${interactiveInput.replace("\"", "\\\"")}",
-    api_name="/predict"
+    $pythonArgs,
+    api_name="/$currentApiName"
 )
 print(result)
-                    """.trimIndent()
-                )
-
-                CodeBlockView(
-                    code = """
-curl -X POST ${currentSpace.directEmbedUrl}/api/predict \
-  -H "Content-Type: application/json" \
-  -d '{"data": ["${interactiveInput.replace("\"", "\\\"")}", $temperature, ${maxTokens.toInt()}]}'
                     """.trimIndent()
                 )
             }

@@ -4,13 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -20,7 +17,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -32,10 +28,10 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.model.AgentType
 import com.example.model.HfSpace
-import com.example.model.SessionStatus
 import com.example.ui.SpaceAgentViewModel
 import com.example.ui.components.AgentStepRow
 import com.example.ui.components.CodeBlockView
+import com.example.ui.components.DynamicSpaceInputsSection
 import com.example.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -53,33 +49,32 @@ fun AgentStudioScreen(
     val liveLogs by viewModel.liveLogs.collectAsState()
     val currentSession by viewModel.currentSession.collectAsState()
     val localSpaces by viewModel.localSpaces.collectAsState()
+    val liveSpaces by viewModel.liveSpaces.collectAsState()
+    val inputValues by viewModel.currentInputValues.collectAsState()
 
     var showSpaceSelectorDialog by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
 
-    // Example prompt presets per agent type
-    val presets = remember(selectedAgentType) {
-        when (selectedAgentType) {
-            AgentType.REASONING -> listOf(
-                "If 5 machines make 5 widgets in 5 minutes, how long do 100 machines need for 100 widgets?",
-                "Analyze the paradox of Schrödinger's cat in terms of many-worlds vs Copenhagen interpretation",
-                "Solve this logic grid: Alice, Bob, and Charlie each wear a red or blue hat..."
-            )
-            AgentType.CODER -> listOf(
-                "Write an optimized Python fast-Fourier-transform with benchmark comparison",
-                "Create a Kotlin coroutine flow channel with debounce and backpressure management",
-                "Build a clean REST API client in Python with retry backoff and rate limit handling"
-            )
-            AgentType.IMAGE_STUDIO -> listOf(
-                "A futuristic cybernetic explorer looking at bioluminescent flora in a neon cave, 8k cinematic",
-                "Vintage oil painting of an astronomer observing a supernova through a steampunk telescope",
-                "Minimalist 3D isometric laboratory with holographic displays and warm golden lighting"
-            )
-            AgentType.GENERAL -> listOf(
-                "Summarize key breakthroughs in LLM reasoning models over the past 6 months",
-                "Formulate a complete marketing launch strategy for an open-source AI developer tool",
-                "Design a robust system architecture for multi-agent tool execution"
-            )
+    val selectableSpaces = remember(liveSpaces, localSpaces) {
+        if (liveSpaces.isNotEmpty()) {
+            liveSpaces
+        } else {
+            localSpaces.map { e ->
+                HfSpace(
+                    id = e.id,
+                    author = e.author,
+                    name = e.name,
+                    title = e.title,
+                    description = e.description,
+                    sdk = e.sdk,
+                    category = e.category,
+                    likes = e.likes,
+                    endpointUrl = e.endpointUrl,
+                    isFavorite = e.isFavorite,
+                    isCurated = e.isCurated,
+                    demoPrompt = e.demoPrompt
+                )
+            }
         }
     }
 
@@ -89,7 +84,7 @@ fun AgentStudioScreen(
             .verticalScroll(scrollState)
             .padding(16.dp)
             .testTag("agent_studio_screen"),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // Agent Mode Selector Cards
         Text(
@@ -138,13 +133,13 @@ fun AgentStudioScreen(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Utilizing Space:",
+                        text = "Utilizing Hugging Face Space:",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.secondary
                     )
                     Text(
-                        text = selectedSpace.title,
+                        text = "${selectedSpace.emoji} ${selectedSpace.title}",
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
                         color = MaterialTheme.colorScheme.onSurface
@@ -163,7 +158,7 @@ fun AgentStudioScreen(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     modifier = Modifier.testTag("change_space_button")
                 ) {
-                    Text(text = "Change", fontSize = 12.sp)
+                    Text(text = "Change Space", fontSize = 12.sp)
                 }
             }
         }
@@ -194,7 +189,7 @@ fun AgentStudioScreen(
                         color = Color.White
                     )
                     Text(
-                        text = "Runs via Foreground Service with CPU lock. Feel free to switch apps or turn off your screen while this space processes.",
+                        text = "Uploads files & executes Space endpoints via Foreground Service with CPU WakeLock. Feel free to switch apps while processing.",
                         fontSize = 11.sp,
                         color = Color(0xFF94A3B8),
                         lineHeight = 15.sp
@@ -203,64 +198,52 @@ fun AgentStudioScreen(
             }
         }
 
-        // Prompt Input
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        // 1:1 Dynamic Space Inputs (Video, Image, Audio, File Uploaders, Sliders, Dropdowns, Prompts)
+        DynamicSpaceInputsSection(viewModel = viewModel)
+
+        // Optional Agent Goal / Post-Processing Instructions
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(
-                    text = "Agent Goal / Prompt",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-                if (goalPrompt.isNotBlank()) {
-                    TextButton(
-                        onClick = { viewModel.setAgentPrompt("") },
-                        contentPadding = PaddingValues(0.dp)
-                    ) {
-                        Text("Clear", fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "🤖 Agent Instructions / Goal (Optional)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (goalPrompt.isNotBlank()) {
+                        TextButton(
+                            onClick = { viewModel.setAgentPrompt("") },
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("Clear", fontSize = 12.sp)
+                        }
                     }
                 }
-            }
 
-            OutlinedTextField(
-                value = goalPrompt,
-                onValueChange = { viewModel.setAgentPrompt(it) },
-                placeholder = { Text("Describe the task, code, or prompt you want the Agent to execute on this Space...") },
-                minLines = 3,
-                maxLines = 6,
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("agent_goal_input")
-            )
-
-            // Preset Prompts Chips
-            Text(
-                text = "Preset prompts:",
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                presets.forEach { preset ->
-                    SuggestionChip(
-                        onClick = { viewModel.setAgentPrompt(preset) },
-                        label = {
-                            Text(
-                                text = preset.take(30) + "...",
-                                fontSize = 11.sp
-                            )
-                        },
-                        shape = RoundedCornerShape(8.dp)
-                    )
-                }
+                OutlinedTextField(
+                    value = goalPrompt,
+                    onValueChange = { viewModel.setAgentPrompt(it) },
+                    placeholder = { Text("Optional instructions for how the Agent should orchestrate or post-process this Space task...") },
+                    minLines = 2,
+                    maxLines = 4,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("agent_goal_input")
+                )
             }
         }
 
@@ -271,10 +254,10 @@ fun AgentStudioScreen(
         ) {
             Button(
                 onClick = { viewModel.startAgentExecution(context) },
-                enabled = !isRunning && goalPrompt.isNotBlank(),
+                enabled = !isRunning && (goalPrompt.isNotBlank() || inputValues.isNotEmpty()),
                 modifier = Modifier
                     .weight(1f)
-                    .height(48.dp)
+                    .height(50.dp)
                     .testTag("run_agent_button"),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
@@ -293,7 +276,10 @@ fun AgentStudioScreen(
                 } else {
                     Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "Run Agent Task", fontWeight = FontWeight.Bold)
+                    Text(
+                        text = "Run Agent with ${inputValues.size} Input${if (inputValues.size == 1) "" else "s"}",
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
 
@@ -303,7 +289,7 @@ fun AgentStudioScreen(
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = CoralError),
                     modifier = Modifier
-                        .height(48.dp)
+                        .height(50.dp)
                         .testTag("cancel_agent_button")
                 ) {
                     Icon(imageVector = Icons.Default.Stop, contentDescription = null)
@@ -313,7 +299,7 @@ fun AgentStudioScreen(
             }
         }
 
-        // Live Execution Stepper (Shows during or after execution)
+        // Live Execution Stepper
         if (currentSteps.isNotEmpty()) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -347,7 +333,11 @@ fun AgentStudioScreen(
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A))
             ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp)
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -376,11 +366,11 @@ fun AgentStudioScreen(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 160.dp)
+                            .heightIn(max = 180.dp)
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
-                        liveLogs.takeLast(15).forEach { log ->
+                        liveLogs.takeLast(20).forEach { log ->
                             Text(
                                 text = log,
                                 fontFamily = FontFamily.Monospace,
@@ -403,7 +393,6 @@ fun AgentStudioScreen(
                 fontWeight = FontWeight.Bold
             )
 
-            // Image Preview if available
             if (!session.imageUrl.isNullOrBlank()) {
                 Card(
                     modifier = Modifier
@@ -420,13 +409,16 @@ fun AgentStudioScreen(
                 }
             }
 
-            // Output Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -458,7 +450,6 @@ fun AgentStudioScreen(
                     Spacer(modifier = Modifier.height(8.dp))
 
                     if (session.finalOutput.contains("```")) {
-                        // Extract code block
                         val codePart = session.finalOutput.substringAfter("```python\n")
                             .substringBefore("```")
                             .ifBlank {
@@ -492,47 +483,32 @@ fun AgentStudioScreen(
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(300.dp),
+                        .height(340.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(localSpaces.size) { index ->
-                        val spaceEntity = localSpaces[index]
+                    items(selectableSpaces.size) { index ->
+                        val sp = selectableSpaces[index]
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    viewModel.setAgentSpace(
-                                        HfSpace(
-                                            id = spaceEntity.id,
-                                            author = spaceEntity.author,
-                                            name = spaceEntity.name,
-                                            title = spaceEntity.title,
-                                            description = spaceEntity.description,
-                                            sdk = spaceEntity.sdk,
-                                            category = spaceEntity.category,
-                                            likes = spaceEntity.likes,
-                                            endpointUrl = spaceEntity.endpointUrl,
-                                            isFavorite = spaceEntity.isFavorite,
-                                            isCurated = spaceEntity.isCurated,
-                                            demoPrompt = spaceEntity.demoPrompt
-                                        )
-                                    )
+                                    viewModel.setAgentSpace(sp)
                                     showSpaceSelectorDialog = false
                                 },
                             colors = CardDefaults.cardColors(
-                                containerColor = if (spaceEntity.id == selectedSpace.id)
+                                containerColor = if (sp.id == selectedSpace.id)
                                     MaterialTheme.colorScheme.primaryContainer
                                 else MaterialTheme.colorScheme.surfaceVariant
                             )
                         ) {
                             Column(modifier = Modifier.padding(12.dp)) {
                                 Text(
-                                    text = spaceEntity.title,
+                                    text = "${sp.emoji} ${sp.title}",
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
                                 Text(
-                                    text = spaceEntity.id,
+                                    text = "${sp.id} • ${sp.category}",
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
                                     color = MaterialTheme.colorScheme.secondary

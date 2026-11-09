@@ -2,6 +2,8 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AgentSessionEntity
@@ -10,7 +12,12 @@ import com.example.data.SpaceEntity
 import com.example.model.AgentType
 import com.example.model.HfSpace
 import com.example.model.SpaceCategoryFilter
+import com.example.model.SpaceEndpointSpec
+import com.example.model.SpaceInputType
+import com.example.model.SpaceInputValue
+import com.example.model.SpaceParameterSpec
 import com.example.model.SpaceRuntimeFilter
+import com.example.model.SpaceSchema
 import com.example.model.SpaceSdkFilter
 import com.example.model.SpaceSortOption
 import com.example.network.HfApiClient
@@ -65,6 +72,28 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     private val _agentGoalPrompt = MutableStateFlow("Analyze and solve: If 5 machines take 5 minutes to make 5 widgets, how long will 100 machines take to make 100 widgets?")
     val agentGoalPrompt: StateFlow<String> = _agentGoalPrompt.asStateFlow()
 
+    // 1:1 Dynamic Space Schema & Multi-Input State (shared across Interactive & Agent Studio)
+    private val _activeSpaceSchema = MutableStateFlow<SpaceSchema?>(null)
+    val activeSpaceSchema: StateFlow<SpaceSchema?> = _activeSpaceSchema.asStateFlow()
+
+    private val _isLoadingSchema = MutableStateFlow(false)
+    val isLoadingSchema: StateFlow<Boolean> = _isLoadingSchema.asStateFlow()
+
+    private val _selectedEndpointIndex = MutableStateFlow(0)
+    val selectedEndpointIndex: StateFlow<Int> = _selectedEndpointIndex.asStateFlow()
+
+    private val _currentEndpointSpecs = MutableStateFlow<List<SpaceParameterSpec>>(emptyList())
+    val currentEndpointSpecs: StateFlow<List<SpaceParameterSpec>> = _currentEndpointSpecs.asStateFlow()
+
+    private val _currentInputValues = MutableStateFlow<List<SpaceInputValue>>(emptyList())
+    val currentInputValues: StateFlow<List<SpaceInputValue>> = _currentInputValues.asStateFlow()
+
+    private val _interactiveOutput = MutableStateFlow<String?>(null)
+    val interactiveOutput: StateFlow<String?> = _interactiveOutput.asStateFlow()
+
+    private val _isInteractiveExecuting = MutableStateFlow(false)
+    val isInteractiveExecuting: StateFlow<Boolean> = _isInteractiveExecuting.asStateFlow()
+
     // Live Hugging Face Spaces Browser State (mirrors https://huggingface.co/spaces)
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
@@ -91,6 +120,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     val liveSyncStatus: StateFlow<String> = _liveSyncStatus.asStateFlow()
 
     private var fetchJob: Job? = null
+    private var schemaJob: Job? = null
 
     // Database Flows
     val localSpaces: StateFlow<List<SpaceEntity>> = spaceDao.getAllSpaces().stateIn(
@@ -116,6 +146,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     init {
         seedCuratedSpacesIfEmpty()
         refreshLiveSpaces(immediate = true)
+        loadSchemaForSpace(_selectedSpaceForAgent.value)
     }
 
     private fun seedCuratedSpacesIfEmpty() {
@@ -142,11 +173,236 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Fetches the 1:1 Gradio Schema (/gradio_api/info, /info, /config) for the target Space
+     * and initializes all dynamic input parameters (Video, Image, Audio, File, Sliders, Dropdowns, Text, etc.).
+     */
+    fun loadSchemaForSpace(space: HfSpace) {
+        schemaJob?.cancel()
+        // Immediately seed with inferred multi-input schema so UI is never blank while loading
+        val initialInferred = apiClient.buildInferredSpaceSchema(space)
+        applySchema(initialInferred, 0)
+        _isLoadingSchema.value = true
+
+        schemaJob = viewModelScope.launch {
+            try {
+                val liveSchema = apiClient.fetchSpaceSchema(space)
+                applySchema(liveSchema, 0)
+            } catch (_: Exception) {
+                // Keep initial inferred schema
+            } finally {
+                _isLoadingSchema.value = false
+            }
+        }
+    }
+
+    private fun applySchema(schema: SpaceSchema, endpointIdx: Int) {
+        _activeSpaceSchema.value = schema
+        val safeIdx = endpointIdx.coerceIn(0, (schema.endpoints.size - 1).coerceAtLeast(0))
+        _selectedEndpointIndex.value = safeIdx
+
+        val endpoint = schema.endpoints.getOrNull(safeIdx)
+        val specs = endpoint?.parameters ?: emptyList()
+        _currentEndpointSpecs.value = specs
+
+        _currentInputValues.value = specs.map { spec ->
+            val defaultNum = spec.defaultValue.toFloatOrNull()
+                ?: if (spec.inputType == SpaceInputType.SLIDER) ((spec.min + spec.max) / 2f) else 0f
+            val defaultBool = spec.defaultValue.equals("true", ignoreCase = true)
+            val defaultText = when (spec.inputType) {
+                SpaceInputType.DROPDOWN -> spec.defaultValue.ifBlank { spec.choices.firstOrNull() ?: "" }
+                SpaceInputType.TEXT -> spec.defaultValue
+                else -> ""
+            }
+            SpaceInputValue(
+                paramIndex = spec.index,
+                paramName = spec.name,
+                paramLabel = spec.label,
+                inputType = spec.inputType,
+                textValue = defaultText,
+                numberValue = defaultNum.coerceIn(spec.min, spec.max.coerceAtLeast(spec.min)),
+                booleanValue = defaultBool
+            )
+        }
+    }
+
+    fun selectEndpoint(index: Int) {
+        val schema = _activeSpaceSchema.value ?: return
+        applySchema(schema, index)
+    }
+
+    fun updateTextInput(paramIndex: Int, text: String) {
+        _currentInputValues.value = _currentInputValues.value.map {
+            if (it.paramIndex == paramIndex) it.copy(textValue = text) else it
+        }
+        // Keep agentGoalPrompt synced if this is the primary text parameter
+        if (paramIndex == 0 && text.isNotBlank()) {
+            _agentGoalPrompt.value = text
+        }
+    }
+
+    fun updateNumberInput(paramIndex: Int, number: Float) {
+        _currentInputValues.value = _currentInputValues.value.map {
+            if (it.paramIndex == paramIndex) it.copy(numberValue = number) else it
+        }
+    }
+
+    fun updateBooleanInput(paramIndex: Int, boolVal: Boolean) {
+        _currentInputValues.value = _currentInputValues.value.map {
+            if (it.paramIndex == paramIndex) it.copy(booleanValue = boolVal) else it
+        }
+    }
+
+    fun updateFileInputFromUri(context: Context, paramIndex: Int, uri: Uri?) {
+        if (uri == null) {
+            _currentInputValues.value = _currentInputValues.value.map {
+                if (it.paramIndex == paramIndex) {
+                    it.copy(fileUri = null, fileName = null, fileSizeBytes = 0L, mimeType = null)
+                } else it
+            }
+            return
+        }
+
+        // Persist read permission if possible so background service can read it
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: Exception) {
+        }
+
+        var fileName = uri.lastPathSegment ?: "selected_file"
+        var fileSize = 0L
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx != -1) {
+                        cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { fileName = it }
+                    }
+                    if (sizeIdx != -1 && !cursor.isNull(sizeIdx)) {
+                        fileSize = cursor.getLong(sizeIdx)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        val mimeType = context.contentResolver.getType(uri) ?: when {
+            fileName.endsWith(".mp4", true) || fileName.endsWith(".mov", true) -> "video/mp4"
+            fileName.endsWith(".png", true) -> "image/png"
+            fileName.endsWith(".jpg", true) || fileName.endsWith(".jpeg", true) -> "image/jpeg"
+            fileName.endsWith(".wav", true) -> "audio/wav"
+            fileName.endsWith(".mp3", true) -> "audio/mpeg"
+            else -> "application/octet-stream"
+        }
+
+        _currentInputValues.value = _currentInputValues.value.map {
+            if (it.paramIndex == paramIndex) {
+                it.copy(
+                    fileUri = uri.toString(),
+                    fileName = fileName,
+                    fileSizeBytes = fileSize,
+                    mimeType = mimeType
+                )
+            } else it
+        }
+    }
+
+    fun addCustomParameter(label: String, inputType: SpaceInputType) {
+        val currentSpecs = _currentEndpointSpecs.value
+        val newIdx = currentSpecs.size
+        val cleanName = label.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifBlank { "input_${newIdx + 1}" }
+        val newSpec = SpaceParameterSpec(
+            index = newIdx,
+            name = cleanName,
+            label = label.ifBlank { "${inputType.displayName} #${newIdx + 1}" },
+            componentName = inputType.displayName,
+            inputType = inputType,
+            isRequired = false,
+            defaultValue = if (inputType == SpaceInputType.SLIDER) "50" else "",
+            min = 0f,
+            max = 100f,
+            step = 1f
+        )
+
+        _currentEndpointSpecs.value = currentSpecs + newSpec
+        _currentInputValues.value = _currentInputValues.value + SpaceInputValue(
+            paramIndex = newIdx,
+            paramName = newSpec.name,
+            paramLabel = newSpec.label,
+            inputType = inputType,
+            numberValue = if (inputType == SpaceInputType.SLIDER) 50f else 0f
+        )
+    }
+
+    fun getCurrentApiName(): String {
+        val schema = _activeSpaceSchema.value ?: return "predict"
+        val idx = _selectedEndpointIndex.value
+        return schema.endpoints.getOrNull(idx)?.apiName ?: "predict"
+    }
+
+    fun executeInteractiveSpaceCall(context: Context) {
+        val space = _selectedWebSpace.value ?: _selectedSpaceForAgent.value
+        val apiName = getCurrentApiName()
+        val inputs = _currentInputValues.value
+
+        _isInteractiveExecuting.value = true
+        _interactiveOutput.value = "⏳ Uploading inputs & executing /$apiName on ${space.id}..."
+
+        viewModelScope.launch {
+            val logs = mutableListOf<String>()
+            val result = apiClient.executeSpaceWithInputs(
+                context = context,
+                spaceId = space.id,
+                apiName = apiName,
+                inputs = inputs,
+                onProgressLog = { msg ->
+                    logs.add(msg)
+                    _interactiveOutput.value = logs.joinToString("\n")
+                }
+            )
+
+            if (result.isSuccess) {
+                val raw = result.getOrNull() ?: ""
+                _interactiveOutput.value = buildString {
+                    if (logs.isNotEmpty()) {
+                        appendLine(logs.joinToString("\n"))
+                        appendLine()
+                    }
+                    appendLine("✅ Response from ${space.id} (/$apiName):")
+                    appendLine(raw)
+                }
+            } else {
+                // Start in resilient background Agent Engine if direct synchronous call needs queue/synthesis
+                _interactiveOutput.value = buildString {
+                    if (logs.isNotEmpty()) {
+                        appendLine(logs.joinToString("\n"))
+                        appendLine()
+                    }
+                    appendLine("🔒 Handing off multi-input execution (${inputs.size} parameters) to Anti-Timeout Background Service...")
+                    inputs.forEach { appendLine("• ${it.toDisplaySummary()}") }
+                }
+                ExecutionManager.startTask(
+                    context = context,
+                    goal = _agentGoalPrompt.value,
+                    agentType = _selectedAgentType.value,
+                    space = space,
+                    apiName = apiName,
+                    inputs = inputs
+                )
+            }
+            _isInteractiveExecuting.value = false
+        }
+    }
+
     fun refreshLiveSpaces(immediate: Boolean = true) {
         fetchJob?.cancel()
         fetchJob = viewModelScope.launch {
             if (!immediate) {
-                delay(350) // Debounce live search typing
+                delay(350)
             }
             _isLoadingLiveSpaces.value = true
             _liveSyncStatus.value = "Fetching live from huggingface.co/spaces..."
@@ -158,7 +414,6 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
             }
             val favoriteIds = savedEntities.filter { it.isFavorite }.map { it.id }.toSet()
 
-            // If user filtered strictly to Saved spaces and has no query, show saved spaces merged with live
             if (_selectedRuntimeFilter.value == SpaceRuntimeFilter.SAVED && _searchQuery.value.isBlank()) {
                 val savedSpaces = savedEntities.filter { it.isFavorite }.map { e ->
                     HfSpace(
@@ -195,7 +450,6 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
             result.onSuccess { fetched ->
                 _liveSpaces.value = fetched
                 _liveSyncStatus.value = "Live • ${fetched.size} Spaces from huggingface.co/spaces"
-                // Cache top fetched spaces into local DB so Agent picker also has them
                 val toCache = fetched.take(15).map { s ->
                     SpaceEntity(
                         id = s.id,
@@ -216,7 +470,6 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
                     spaceDao.insertSpaces(toCache)
                 } catch (_: Exception) {}
             }.onFailure { err ->
-                // Fallback to cached local spaces if offline
                 if (_liveSpaces.value.isEmpty()) {
                     _liveSpaces.value = savedEntities.map { e ->
                         HfSpace(
@@ -273,11 +526,15 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     fun openSpaceInWeb(space: HfSpace) {
         _selectedWebSpace.value = space
+        _selectedSpaceForAgent.value = space
+        _interactiveOutput.value = null
+        loadSchemaForSpace(space)
         _currentScreen.value = AppScreen.WEB_VIEW
     }
 
     fun openSpaceInAgent(space: HfSpace) {
         _selectedSpaceForAgent.value = space
+        _selectedWebSpace.value = space
         val catLower = space.category.lowercase()
         _selectedAgentType.value = when {
             catLower.contains("reason") || catLower.contains("agent") -> AgentType.REASONING
@@ -288,6 +545,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
         if (space.demoPrompt.isNotBlank()) {
             _agentGoalPrompt.value = space.demoPrompt
         }
+        loadSchemaForSpace(space)
         _currentScreen.value = AppScreen.AGENT_STUDIO
     }
 
@@ -301,11 +559,13 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
             if (matching.demoPrompt.isNotBlank()) {
                 _agentGoalPrompt.value = matching.demoPrompt
             }
+            loadSchemaForSpace(matching)
         }
     }
 
     fun setAgentSpace(space: HfSpace) {
         _selectedSpaceForAgent.value = space
+        loadSchemaForSpace(space)
     }
 
     fun setAgentPrompt(prompt: String) {
@@ -313,14 +573,17 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun startAgentExecution(context: Context) {
+        val inputs = _currentInputValues.value
         val prompt = _agentGoalPrompt.value.trim()
-        if (prompt.isBlank()) return
+        if (prompt.isBlank() && inputs.isEmpty()) return
 
         ExecutionManager.startTask(
             context = context,
             goal = prompt,
             agentType = _selectedAgentType.value,
-            space = _selectedSpaceForAgent.value
+            space = _selectedSpaceForAgent.value,
+            apiName = getCurrentApiName(),
+            inputs = inputs
         )
     }
 
@@ -336,7 +599,6 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     fun toggleFavorite(space: HfSpace) {
         val newFav = !space.isFavorite
-        // Optimistically update in live list
         _liveSpaces.value = _liveSpaces.value.map {
             if (it.id == space.id) it.copy(isFavorite = newFav) else it
         }

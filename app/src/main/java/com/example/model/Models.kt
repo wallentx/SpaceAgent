@@ -1,5 +1,8 @@
 package com.example.model
 
+import org.json.JSONArray
+import org.json.JSONObject
+
 enum class AgentType(val displayName: String, val iconEmoji: String, val defaultSpaceId: String) {
     REASONING(
         displayName = "Deep Reasoning",
@@ -87,6 +90,156 @@ enum class SessionStatus {
     COMPLETED,
     FAILED,
     CANCELLED
+}
+
+enum class SpaceInputType(val displayName: String, val iconEmoji: String) {
+    TEXT("Text / Prompt", "📝"),
+    NUMBER("Number", "🔢"),
+    SLIDER("Slider Range", "🎚️"),
+    BOOLEAN("Checkbox / Toggle", "☑️"),
+    DROPDOWN("Choice / Dropdown", "📋"),
+    IMAGE("Image Upload", "🖼️"),
+    VIDEO("Video Upload", "🎬"),
+    AUDIO("Audio Upload", "🎵"),
+    FILE("File Upload", "📎");
+
+    val isMediaOrFile: Boolean
+        get() = this == IMAGE || this == VIDEO || this == AUDIO || this == FILE
+}
+
+data class SpaceParameterSpec(
+    val index: Int,
+    val name: String,
+    val label: String,
+    val componentName: String,
+    val inputType: SpaceInputType,
+    val isRequired: Boolean = true,
+    val defaultValue: String = "",
+    val min: Float = 0f,
+    val max: Float = 100f,
+    val step: Float = 1f,
+    val choices: List<String> = emptyList(),
+    val description: String = ""
+)
+
+data class SpaceOutputSpec(
+    val label: String,
+    val componentName: String
+)
+
+data class SpaceEndpointSpec(
+    val apiName: String,
+    val parameters: List<SpaceParameterSpec>,
+    val outputs: List<SpaceOutputSpec> = emptyList()
+)
+
+data class SpaceSchema(
+    val spaceId: String,
+    val endpoints: List<SpaceEndpointSpec>,
+    val isLiveFetched: Boolean = true,
+    val schemaSourceNote: String = "Synced 1:1 from Space Gradio API"
+)
+
+data class SpaceInputValue(
+    val paramIndex: Int,
+    val paramName: String,
+    val paramLabel: String,
+    val inputType: SpaceInputType,
+    val textValue: String = "",
+    val numberValue: Float = 0f,
+    val booleanValue: Boolean = false,
+    val fileUri: String? = null,
+    val fileName: String? = null,
+    val fileSizeBytes: Long = 0L,
+    val mimeType: String? = null
+) {
+    fun toDisplaySummary(): String {
+        return when (inputType) {
+            SpaceInputType.IMAGE, SpaceInputType.VIDEO, SpaceInputType.AUDIO, SpaceInputType.FILE -> {
+                if (!fileName.isNullOrBlank()) {
+                    "${inputType.iconEmoji} $paramLabel: $fileName (${formatBytes(fileSizeBytes)})"
+                } else {
+                    "${inputType.iconEmoji} $paramLabel: [No file selected]"
+                }
+            }
+            SpaceInputType.SLIDER, SpaceInputType.NUMBER -> {
+                val formatted = if (numberValue % 1f == 0f) numberValue.toInt().toString() else String.format("%.2f", numberValue)
+                "🎚️ $paramLabel: $formatted"
+            }
+            SpaceInputType.BOOLEAN -> "☑️ $paramLabel: $booleanValue"
+            SpaceInputType.DROPDOWN -> "📋 $paramLabel: $textValue"
+            SpaceInputType.TEXT -> "📝 $paramLabel: ${textValue.ifBlank { "(empty)" }}"
+        }
+    }
+
+    fun toJson(): JSONObject {
+        return JSONObject().apply {
+            put("paramIndex", paramIndex)
+            put("paramName", paramName)
+            put("paramLabel", paramLabel)
+            put("inputType", inputType.name)
+            put("textValue", textValue)
+            put("numberValue", numberValue.toDouble())
+            put("booleanValue", booleanValue)
+            put("fileUri", fileUri ?: "")
+            put("fileName", fileName ?: "")
+            put("fileSizeBytes", fileSizeBytes)
+            put("mimeType", mimeType ?: "")
+        }
+    }
+
+    companion object {
+        fun fromJson(obj: JSONObject): SpaceInputValue {
+            val typeStr = obj.optString("inputType", SpaceInputType.TEXT.name)
+            val inputType = try {
+                SpaceInputType.valueOf(typeStr)
+            } catch (_: Exception) {
+                SpaceInputType.TEXT
+            }
+            return SpaceInputValue(
+                paramIndex = obj.optInt("paramIndex", 0),
+                paramName = obj.optString("paramName", "input"),
+                paramLabel = obj.optString("paramLabel", "Input"),
+                inputType = inputType,
+                textValue = obj.optString("textValue", ""),
+                numberValue = obj.optDouble("numberValue", 0.0).toFloat(),
+                booleanValue = obj.optBoolean("booleanValue", false),
+                fileUri = obj.optString("fileUri", "").takeIf { it.isNotBlank() },
+                fileName = obj.optString("fileName", "").takeIf { it.isNotBlank() },
+                fileSizeBytes = obj.optLong("fileSizeBytes", 0L),
+                mimeType = obj.optString("mimeType", "").takeIf { it.isNotBlank() }
+            )
+        }
+
+        fun listToJsonString(inputs: List<SpaceInputValue>): String {
+            val arr = JSONArray()
+            inputs.forEach { arr.put(it.toJson()) }
+            return arr.toString()
+        }
+
+        fun listFromJsonString(jsonStr: String?): List<SpaceInputValue> {
+            if (jsonStr.isNullOrBlank()) return emptyList()
+            return try {
+                val arr = JSONArray(jsonStr)
+                val list = mutableListOf<SpaceInputValue>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    list.add(fromJson(obj))
+                }
+                list
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+        private fun formatBytes(bytes: Long): String {
+            if (bytes <= 0) return "0 B"
+            val kb = bytes / 1024.0
+            if (kb < 1024) return String.format("%.1f KB", kb)
+            val mb = kb / 1024.0
+            return String.format("%.2f MB", mb)
+        }
+    }
 }
 
 data class HfSpace(
