@@ -15,6 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -36,6 +38,10 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val hfToken by viewModel.hfToken.collectAsState()
+    val tokenError by viewModel.tokenError.collectAsState()
+    val isSavingToken by viewModel.isSavingToken.collectAsState()
+    val tokenSaveStatus by viewModel.tokenSaveStatus.collectAsState()
+    var showToken by remember { mutableStateOf(false) }
     var tokenInput by remember { mutableStateOf(hfToken) }
     var hasNotificationPermission by remember {
         mutableStateOf(
@@ -110,23 +116,36 @@ fun SettingsScreen(
                     onValueChange = { tokenInput = it },
                     placeholder = { Text("hf_xxxxxxxxxxxxxxxxxxxxxxx") },
                     singleLine = true,
+                    visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showToken = !showToken }) {
+                            Icon(if (showToken) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                                contentDescription = if (showToken) "Hide token" else "Show token")
+                        }
+                    },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("hf_token_input")
                 )
 
+                tokenError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (tokenInput.trim() == hfToken) {
+                    tokenSaveStatus?.let { Text(it, color = EmeraldSuccess) }
+                }
+                Text("Tokens are encrypted on this device and excluded from backup.", fontSize = 12.sp)
                 Button(
+                    enabled = !isSavingToken,
                     onClick = {
                         viewModel.setHfToken(tokenInput.trim())
-                        Toast.makeText(context, "Token saved securely!", Toast.LENGTH_SHORT).show()
+
                     },
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.testTag("save_token_btn")
                 ) {
                     Icon(imageVector = Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save Token")
+                    Text(if (isSavingToken) "Saving…" else "Save Token")
                 }
             }
         }
@@ -153,14 +172,14 @@ fun SettingsScreen(
                         tint = EmeraldSuccess
                     )
                     Text(
-                        text = "Why SpaceAgent Doesn't Time Out",
+                        text = "Background Execution Limits",
                         fontWeight = FontWeight.Bold,
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
 
                 Text(
-                    text = "Standard browsers and web apps freeze JavaScript execution and close network sockets when you switch to another app or lock the screen. SpaceAgent solves this with a multi-layer resilience stack:",
+                    text = "A foreground service helps tasks continue when you switch apps. Android, connectivity changes, and the remote Space can still interrupt a run. Failed and cancelled tasks are reported in history.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -188,12 +207,12 @@ fun SettingsScreen(
                         FeatureRow(
                             icon = "🌐",
                             title = "Keep-Alive Socket Engine",
-                            desc = "Maintains HTTP/SSE connections with 300s read timeouts and 15s keep-alive pings."
+                            desc = "Uses bounded network timeouts and reports connection failures."
                         )
                         FeatureRow(
                             icon = "🔔",
                             title = "Task Completion Alerts",
-                            desc = "Notifies you the exact second your Space task finishes so you can open results immediately."
+                            desc = "Posts a result notification when permitted by Android."
                         )
                     }
                 }

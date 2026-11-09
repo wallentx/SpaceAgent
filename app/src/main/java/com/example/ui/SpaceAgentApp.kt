@@ -84,7 +84,7 @@ fun SpaceAgentApp(viewModel: SpaceAgentViewModel) {
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Text(
-                                    text = "Anti-Timeout ON",
+                                    text = "Background ON",
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = EmeraldSuccess,

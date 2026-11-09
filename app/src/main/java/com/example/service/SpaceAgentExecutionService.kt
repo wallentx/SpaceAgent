@@ -16,20 +16,26 @@ import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.agent.SpaceAgentEngine
+import com.example.data.HfTokenStore
+import com.example.data.InputUriAccess
 import com.example.model.AgentType
 import com.example.model.HfSpace
 import com.example.model.SpaceInputValue
 import com.example.network.HfApiClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 class SpaceAgentExecutionService : Service() {
-
-    private val serviceJob = Job()
-    private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var agentJob: Job? = null
+    private var activeSessionId: String? = null
+    private var keepAliveActive = false
+    private var keepAliveSpaceTitle = "Interactive Space"
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var notificationManager: NotificationManager
 
@@ -41,7 +47,9 @@ class SpaceAgentExecutionService : Service() {
         const val NOTIFICATION_ID_COMPLETED = 1002
 
         const val ACTION_START_AGENT_TASK = "com.example.action.START_AGENT_TASK"
+        const val ACTION_CANCEL_AGENT_TASK = "com.example.action.CANCEL_AGENT_TASK"
         const val ACTION_START_KEEP_ALIVE = "com.example.action.START_KEEP_ALIVE"
+        const val ACTION_STOP_KEEP_ALIVE = "com.example.action.STOP_KEEP_ALIVE"
         const val ACTION_STOP_SERVICE = "com.example.action.STOP_SERVICE"
 
         const val EXTRA_SESSION_ID = "extra_session_id"
@@ -58,108 +66,79 @@ class SpaceAgentExecutionService : Service() {
         super.onCreate()
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         createNotificationChannels()
-
-        try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "SpaceAgent:ExecutionLock"
-            ).apply {
-                setReferenceCounted(false)
-                acquire(15 * 60 * 1000L) // Safe 15 min lock
-            }
-            Log.d(TAG, "WakeLock acquired for background space execution resilience")
-        } catch (e: Exception) {
-            Log.w(TAG, "WakeLock could not be acquired: ${e.message}")
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) return START_NOT_STICKY
-
         when (intent.action) {
-            ACTION_START_AGENT_TASK -> {
-                val goal = intent.getStringExtra(EXTRA_GOAL) ?: "Hugging Face Space Task"
-                val agentTypeName = intent.getStringExtra(EXTRA_AGENT_TYPE) ?: AgentType.GENERAL.name
-                val spaceId = intent.getStringExtra(EXTRA_SPACE_ID) ?: "deepseek-ai/DeepSeek-R1"
-                val spaceName = intent.getStringExtra(EXTRA_SPACE_NAME) ?: "HF Space"
-                val spaceUrl = intent.getStringExtra(EXTRA_SPACE_URL) ?: "https://huggingface.co/spaces/$spaceId"
-                val apiName = intent.getStringExtra(EXTRA_API_NAME) ?: "predict"
-                val inputsJson = intent.getStringExtra(EXTRA_INPUTS_JSON)
-                val inputs = SpaceInputValue.listFromJsonString(inputsJson)
-
-                val agentType = try {
-                    AgentType.valueOf(agentTypeName)
-                } catch (_: Exception) {
-                    AgentType.GENERAL
-                }
-
-                val space = HfSpace(
-                    id = spaceId,
-                    author = spaceId.substringBefore("/"),
-                    name = spaceId.substringAfter("/"),
-                    title = spaceName,
-                    description = "",
-                    sdk = "gradio",
-                    category = "General",
-                    likes = 0,
-                    endpointUrl = spaceUrl
-                )
-
-                startForegroundServiceCompat(
-                    NOTIFICATION_ID_RUNNING,
-                    buildOngoingNotification("Agent Mode: Initializing $spaceName...", "Preparing execution plan")
-                )
-
-                runAgentTask(goal, agentType, space, apiName, inputs)
-            }
-
-            ACTION_START_KEEP_ALIVE -> {
-                val spaceTitle = intent.getStringExtra(EXTRA_SPACE_NAME) ?: "Interactive Space"
-                startForegroundServiceCompat(
-                    NOTIFICATION_ID_RUNNING,
-                    buildOngoingNotification(
-                        "Space Active: $spaceTitle",
-                        "Background keep-alive active — will not time out when switched away"
-                    )
-                )
-            }
-
+            ACTION_START_AGENT_TASK -> startAgent(intent)
+            ACTION_CANCEL_AGENT_TASK -> cancelAgent(intent.getStringExtra(EXTRA_SESSION_ID))
+            ACTION_START_KEEP_ALIVE -> startKeepAlive(intent.getStringExtra(EXTRA_SPACE_NAME))
+            ACTION_STOP_KEEP_ALIVE -> stopKeepAlive()
             ACTION_STOP_SERVICE -> {
-                stopForegroundAndSelf()
+                keepAliveActive = false
+                agentJob?.cancel()
+                stopIfIdle()
             }
         }
-
         return START_NOT_STICKY
     }
 
-    private fun startForegroundServiceCompat(notificationId: Int, notification: Notification) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                notificationId,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            startForeground(notificationId, notification)
+    private fun startAgent(intent: Intent) {
+        val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
+        if (!ExecutionManager.isSessionActive(sessionId)) {
+            InputUriAccess.release(InputUriAccess.sessionOwner(sessionId))
+            stopIfIdle()
+            return
         }
+        if (agentJob?.isActive == true) {
+            if (activeSessionId == sessionId) return
+            Log.w(TAG, "Ignoring overlapping task $sessionId; $activeSessionId is active")
+            ExecutionManager.failTask(sessionId, applicationContext, "Another Space task is already running")
+            InputUriAccess.release(InputUriAccess.sessionOwner(sessionId))
+            return
+        }
+
+        val goal = intent.getStringExtra(EXTRA_GOAL) ?: "Hugging Face Space Task"
+        val agentType = runCatching {
+            AgentType.valueOf(intent.getStringExtra(EXTRA_AGENT_TYPE) ?: AgentType.GENERAL.name)
+        }.getOrDefault(AgentType.GENERAL)
+        val spaceId = intent.getStringExtra(EXTRA_SPACE_ID) ?: return
+        val spaceTitle = intent.getStringExtra(EXTRA_SPACE_NAME) ?: "HF Space"
+        val space = HfSpace(
+            id = spaceId,
+            author = spaceId.substringBefore("/"),
+            name = spaceId.substringAfter("/"),
+            title = spaceTitle,
+            description = "",
+            sdk = "gradio",
+            category = "General",
+            likes = 0,
+            endpointUrl = intent.getStringExtra(EXTRA_SPACE_URL) ?: HfSpace.toSanitizedSpaceEndpoint(spaceId)
+        )
+        val apiName = intent.getStringExtra(EXTRA_API_NAME) ?: "predict"
+        val inputs = SpaceInputValue.listFromJsonString(intent.getStringExtra(EXTRA_INPUTS_JSON))
+
+        activeSessionId = sessionId
+        ensureWakeLock()
+        startForegroundServiceCompat(
+            buildOngoingNotification("Agent: $spaceTitle", "Starting /$apiName")
+        )
+        runAgentTask(sessionId, goal, agentType, space, apiName, inputs)
     }
 
     private fun runAgentTask(
+        sessionId: String,
         goal: String,
         agentType: AgentType,
         space: HfSpace,
         apiName: String,
         inputs: List<SpaceInputValue>
     ) {
-        serviceScope.launch {
-            val sharedPrefs = getSharedPreferences("space_agent_prefs", Context.MODE_PRIVATE)
-            val token = sharedPrefs.getString("hf_api_token", null)
-
-            val apiClient = HfApiClient { token }
-            val engine = SpaceAgentEngine(apiClient)
-
+        agentJob = serviceScope.launch {
             try {
+                val token = HfTokenStore(applicationContext).read()
+                val engine = SpaceAgentEngine(HfApiClient { token })
                 val result = engine.executeAgentTask(
                     context = applicationContext,
                     goal = goal,
@@ -168,149 +147,189 @@ class SpaceAgentExecutionService : Service() {
                     apiName = apiName,
                     inputs = inputs,
                     onStepUpdate = { _, step ->
-                        ExecutionManager.updateSteps(
-                            ExecutionManager.currentSteps.value.toMutableList().apply {
-                                val idx = indexOfFirst { it.stepNumber == step.stepNumber }
-                                if (idx != -1) set(idx, step) else add(step)
-                            }
-                        )
-                        updateOngoingNotification(
-                            "Step ${step.stepNumber}/4: ${step.title}",
-                            "${space.title} — ${step.description}"
-                        )
+                        if (ExecutionManager.updateStep(sessionId, step)) {
+                            updateOngoingNotification(
+                                "Step ${step.stepNumber}/4: ${step.title}",
+                                "${space.title} — ${step.logOutput}"
+                            )
+                        }
                     },
-                    onLog = { logMsg ->
-                        ExecutionManager.addLog(logMsg)
-                    }
+                    onLog = { ExecutionManager.addLog(sessionId, it) }
                 )
 
-                ExecutionManager.finishTask(
-                    context = applicationContext,
-                    finalOutput = result.finalOutput,
-                    imageUrl = result.imageUrl,
-                    steps = result.steps,
-                    durationMs = result.executionTimeMs
-                )
-
-                showCompletionNotification(
-                    title = "🎉 Task Completed on ${space.name}!",
-                    text = "Goal finished: ${goal.take(50)}... Tap to view results."
-                )
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Agent task failed in service", e)
-                ExecutionManager.failTask(applicationContext, e.localizedMessage ?: "Unknown error")
-                showCompletionNotification(
-                    title = "❌ Space Task Notice",
-                    text = "Task finished with status: ${e.message}"
-                )
+                if (ExecutionManager.finishTask(
+                        sessionId = sessionId,
+                        context = applicationContext,
+                        finalOutput = result.finalOutput,
+                        imageUrl = result.imageUrl,
+                        steps = result.steps,
+                        durationMs = result.executionTimeMs
+                    )
+                ) {
+                    showCompletionNotification(
+                        title = "Task completed on ${space.name}",
+                        text = "Tap to view the returned result."
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                Log.d(TAG, "Task $sessionId cancelled")
+                throw cancelled
+            } catch (error: Exception) {
+                Log.e(TAG, "Agent task $sessionId failed", error)
+                if (ExecutionManager.failTask(
+                        sessionId,
+                        applicationContext,
+                        error.localizedMessage ?: "Unknown error"
+                    )
+                ) {
+                    showCompletionNotification(
+                        title = "Space task failed",
+                        text = error.localizedMessage ?: "The Space request did not complete."
+                    )
+                }
             } finally {
-                stopForegroundAndSelf()
+                if (activeSessionId == sessionId) activeSessionId = null
+                agentJob = null
+                stopIfIdle()
             }
+        }.also { job ->
+            job.invokeOnCompletion { InputUriAccess.release(InputUriAccess.sessionOwner(sessionId)) }
+        }
+    }
+
+    private fun cancelAgent(sessionId: String?) {
+        if (sessionId == null || activeSessionId != sessionId) return
+        agentJob?.cancel(CancellationException("Cancelled by user"))
+    }
+
+    private fun startKeepAlive(spaceTitle: String?) {
+        keepAliveActive = true
+        keepAliveSpaceTitle = spaceTitle ?: "Interactive Space"
+        ensureWakeLock()
+        if (agentJob?.isActive != true) {
+            startForegroundServiceCompat(
+                buildOngoingNotification(
+                    "Space active: $keepAliveSpaceTitle",
+                    "Foreground keep-alive is enabled"
+                )
+            )
+        }
+    }
+
+    private fun stopKeepAlive() {
+        keepAliveActive = false
+        stopIfIdle()
+    }
+
+    private fun stopIfIdle() {
+        if (agentJob?.isActive == true) return
+        if (keepAliveActive) {
+            ensureWakeLock()
+            updateOngoingNotification(
+                "Space active: $keepAliveSpaceTitle",
+                "Foreground keep-alive is enabled"
+            )
+            return
+        }
+        releaseWakeLock()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun ensureWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SpaceAgent:ExecutionLock").apply {
+                setReferenceCounted(false)
+                acquire(15 * 60 * 1000L)
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "WakeLock could not be acquired", error)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (error: Exception) {
+            Log.w(TAG, "WakeLock could not be released", error)
+        }
+        wakeLock = null
+    }
+
+    private fun startForegroundServiceCompat(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID_RUNNING, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIFICATION_ID_RUNNING, notification)
         }
     }
 
     private fun createNotificationChannels() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val runningChannel = NotificationChannel(
-                CHANNEL_ID_RUNNING,
-                "Space Agent Background Engine",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Shows live progress when Hugging Face Spaces are running in agent mode"
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        notificationManager.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID_RUNNING, "Space tasks", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Shows progress while a Hugging Face Space request is active"
                 setShowBadge(false)
             }
-
-            val completedChannel = NotificationChannel(
-                CHANNEL_ID_COMPLETED,
-                "Space Agent Completed Alerts",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Alerts you when background Space tasks finish execution"
-                enableVibration(true)
-                setShowBadge(true)
+        )
+        notificationManager.createNotificationChannel(
+            NotificationChannel(CHANNEL_ID_COMPLETED, "Space task results", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Alerts when a Space task finishes"
             }
-
-            notificationManager.createNotificationChannel(runningChannel)
-            notificationManager.createNotificationChannel(completedChannel)
-        }
+        )
     }
 
-    private fun buildOngoingNotification(title: String, text: String): Notification {
-        val openAppIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            openAppIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        return NotificationCompat.Builder(this, CHANNEL_ID_RUNNING)
+    private fun buildOngoingNotification(title: String, text: String): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID_RUNNING)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(openAppPendingIntent(0))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setProgress(0, 0, true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
-    }
 
     private fun updateOngoingNotification(title: String, text: String) {
-        val notification = buildOngoingNotification(title, text)
-        notificationManager.notify(NOTIFICATION_ID_RUNNING, notification)
+        notificationManager.notify(NOTIFICATION_ID_RUNNING, buildOngoingNotification(title, text))
     }
 
     private fun showCompletionNotification(title: String, text: String) {
-        val openAppIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            1,
-            openAppIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        notificationManager.notify(
+            NOTIFICATION_ID_COMPLETED,
+            NotificationCompat.Builder(this, CHANNEL_ID_COMPLETED)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentIntent(openAppPendingIntent(1))
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
         )
-
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID_COMPLETED)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pendingIntent)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .build()
-
-        notificationManager.notify(NOTIFICATION_ID_COMPLETED, notification)
     }
 
-    private fun stopForegroundAndSelf() {
-        try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-                Log.d(TAG, "WakeLock released")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing WakeLock: ${e.message}")
-        }
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
+    private fun openAppPendingIntent(requestCode: Int): PendingIntent = PendingIntent.getActivity(
+        this,
+        requestCode,
+        Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        },
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
 
     override fun onDestroy() {
-        super.onDestroy()
+        activeSessionId?.let {
+            ExecutionManager.failTask(it, applicationContext, "Background service stopped before completion")
+        }
+        activeSessionId = null
         serviceScope.cancel()
-        try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-        } catch (_: Exception) {}
-        Log.d(TAG, "SpaceAgentExecutionService destroyed")
+        releaseWakeLock()
+        ExecutionManager.onServiceDestroyed()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

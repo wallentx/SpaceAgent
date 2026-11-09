@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,7 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.AgentSessionEntity
 import com.example.ui.SpaceAgentViewModel
-import com.example.ui.components.CodeBlockView
+import com.example.ui.components.SpaceOutputView
 import com.example.ui.theme.EmeraldSuccess
 import com.example.ui.theme.HfYellow
 import java.text.SimpleDateFormat
@@ -228,7 +230,8 @@ fun HistoryScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 420.dp),
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
@@ -252,18 +255,7 @@ fun HistoryScreen(
                     )
 
                     if (!session.finalOutput.isNullOrBlank()) {
-                        if (session.finalOutput.contains("```")) {
-                            val code = session.finalOutput.substringAfter("```python\n")
-                                .substringBefore("```")
-                                .ifBlank { session.finalOutput.substringAfter("```").substringBefore("```") }
-                            CodeBlockView(code = code)
-                        } else {
-                            Text(
-                                text = session.finalOutput,
-                                style = MaterialTheme.typography.bodySmall,
-                                lineHeight = 16.sp
-                            )
-                        }
+                        SpaceOutputView(session.finalOutput)
                     }
                 }
             },

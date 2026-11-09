@@ -14,35 +14,46 @@ import com.example.model.SpaceRuntimeFilter
 import com.example.model.SpaceSchema
 import com.example.model.SpaceSdkFilter
 import com.example.model.SpaceSortOption
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okio.BufferedSink
 import okio.source
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
-class HfApiClient(private val tokenProvider: () -> String?) {
-
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(25, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS) // Extended timeout to prevent drops
-        .writeTimeout(120, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .pingInterval(15, TimeUnit.SECONDS) // Keep-alive ping
-        .build()
+class HfApiClient(
+    private val client: OkHttpClient = createDefaultClient(),
+    private val hubApiBase: String = HF_API_BASE,
+    private val spaceEndpointResolver: (String) -> String = { HfSpace.toSanitizedSpaceEndpoint(it) },
+    private val tokenProvider: () -> String?
+) {
 
     companion object {
         private const val TAG = "HfApiClient"
         private const val HF_API_BASE = "https://huggingface.co/api"
         val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
+
+        private fun createDefaultClient(): OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .pingInterval(15, TimeUnit.SECONDS)
+            .build()
     }
 
     /**
@@ -58,15 +69,9 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         favoriteIds: Set<String> = emptySet(),
         limit: Int = 50
     ): Result<List<HfSpace>> = withContext(Dispatchers.IO) {
-        val effectiveSearch = buildString {
-            if (query.isNotBlank()) {
-                append(query.trim())
-            } else if (categoryFilter != SpaceCategoryFilter.ALL) {
-                append(categoryFilter.id)
-            }
-        }
+        val effectiveSearch = buildSearchQuery(query, categoryFilter)
 
-        val urlBuilder = StringBuilder("$HF_API_BASE/spaces?full=true&limit=$limit&sort=${sortOption.apiSortKey}&direction=-1")
+        val urlBuilder = StringBuilder("$hubApiBase/spaces?full=true&limit=$limit&sort=${sortOption.apiSortKey}&direction=-1")
         if (effectiveSearch.isNotBlank()) {
             urlBuilder.append("&search=").append(URLEncoder.encode(effectiveSearch, "UTF-8"))
         }
@@ -80,7 +85,7 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         }
 
         try {
-            client.newCall(requestBuilder.build()).execute().use { response ->
+            executeRequest(requestBuilder.build()).use { response ->
                 if (!response.isSuccessful) {
                     val msg = "HF Hub HTTP ${response.code}"
                     Log.w(TAG, "Fetch live spaces failed: $msg")
@@ -117,18 +122,26 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                 }
                 return@withContext Result.success(results)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching live spaces from HF API", e)
             return@withContext Result.failure(e)
         }
     }
 
+    internal fun buildSearchQuery(query: String, categoryFilter: SpaceCategoryFilter): String =
+        listOfNotNull(
+            query.trim().takeIf { it.isNotEmpty() },
+            categoryFilter.id.takeIf { categoryFilter != SpaceCategoryFilter.ALL }
+        ).joinToString(" ")
+
     /**
      * Fetches the 1:1 input/output component schema for a Hugging Face Space
      * by inspecting /gradio_api/info, /info, and /config on the Space host.
      */
     suspend fun fetchSpaceSchema(space: HfSpace): SpaceSchema = withContext(Dispatchers.IO) {
-        val baseHost = space.directEmbedUrl.trimEnd('/')
+        val baseHost = spaceEndpointResolver(space.id).trimEnd('/')
         val candidateUrls = listOf(
             "$baseHost/gradio_api/info",
             "$baseHost/info",
@@ -142,7 +155,7 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                     reqBuilder.header("Authorization", "Bearer $token")
                 }
 
-                client.newCall(reqBuilder.build()).execute().use { resp ->
+                executeRequest(reqBuilder.build()).use { resp ->
                     if (resp.isSuccessful) {
                         val body = resp.body?.string() ?: ""
                         if (body.isNotBlank()) {
@@ -171,16 +184,17 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                         }
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.d(TAG, "Schema probe failed for $url: ${e.message}")
             }
         }
 
-        // Fallback: infer rich multi-input schema from Space metadata/task so user still gets file/video/image uploaders & parameters
-        return@withContext buildInferredSpaceSchema(space)
+        return@withContext unavailableSchema(space)
     }
 
-    private fun parseGradioInfoJson(root: JSONObject): List<SpaceEndpointSpec> {
+    internal fun parseGradioInfoJson(root: JSONObject): List<SpaceEndpointSpec> {
         val named = root.optJSONObject("named_endpoints") ?: return emptyList()
         val endpoints = mutableListOf<SpaceEndpointSpec>()
         val keys = named.keys()
@@ -189,8 +203,6 @@ class HfApiClient(private val tokenProvider: () -> String?) {
             val rawKey = keys.next()
             val epObj = named.optJSONObject(rawKey) ?: continue
             val paramsArr = epObj.optJSONArray("parameters") ?: continue
-            if (paramsArr.length() == 0) continue
-
             val params = mutableListOf<SpaceParameterSpec>()
             for (i in 0 until paramsArr.length()) {
                 val pObj = paramsArr.optJSONObject(i) ?: continue
@@ -225,19 +237,18 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                 }
 
                 // Extract min/max for sliders/numbers
-                var minVal = typeObj?.optDouble("minimum", Double.NaN)?.toFloat() ?: Float.NaN
-                var maxVal = typeObj?.optDouble("maximum", Double.NaN)?.toFloat() ?: Float.NaN
-                if (minVal.isNaN() || maxVal.isNaN()) {
+                var minVal = typeObj?.nullableFloat("minimum")
+                var maxVal = typeObj?.nullableFloat("maximum")
+                if (minVal == null || maxVal == null) {
                     val pyDesc = pythonTypeObj?.optString("description") ?: ""
                     val rangeRegex = Regex("between\\s+(-?[0-9.]+)\\s+and\\s+(-?[0-9.]+)", RegexOption.IGNORE_CASE)
                     val match = rangeRegex.find(pyDesc)
                     if (match != null) {
-                        minVal = match.groupValues[1].toFloatOrNull() ?: 0f
-                        maxVal = match.groupValues[2].toFloatOrNull() ?: 100f
+                        if (minVal == null) minVal = match.groupValues[1].toFloatOrNull()
+                        if (maxVal == null) maxVal = match.groupValues[2].toFloatOrNull()
                     }
                 }
-                if (minVal.isNaN()) minVal = 0f
-                if (maxVal.isNaN()) maxVal = if (defaultStr.toFloatOrNull() != null && defaultStr.toFloat() > 100f) defaultStr.toFloat() * 2f else 100f
+                val stepVal = typeObj?.nullableFloat("multipleOf")
 
                 val inputType = classifyInputType(
                     component = component,
@@ -257,9 +268,10 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                         inputType = inputType,
                         isRequired = !hasDefault,
                         defaultValue = defaultStr,
+                        defaultIsNull = hasDefault && (defaultRaw == null || defaultRaw == JSONObject.NULL),
                         min = minVal,
-                        max = maxVal.coerceAtLeast(minVal + 1f),
-                        step = if (maxVal - minVal <= 2f) 0.05f else 1f,
+                        max = maxVal,
+                        step = stepVal,
                         choices = choices,
                         description = desc
                     )
@@ -280,7 +292,8 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                 }
             }
 
-            val cleanApiName = rawKey.trimStart('/').ifBlank { "predict" }
+            val cleanApiName = rawKey.trimStart('/')
+            if (cleanApiName.isBlank()) continue
             endpoints.add(
                 SpaceEndpointSpec(
                     apiName = cleanApiName,
@@ -293,7 +306,7 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         return endpoints
     }
 
-    private fun parseGradioConfigJson(root: JSONObject): List<SpaceEndpointSpec> {
+    internal fun parseGradioConfigJson(root: JSONObject): List<SpaceEndpointSpec> {
         val componentsArr = root.optJSONArray("components") ?: return emptyList()
         val dependenciesArr = root.optJSONArray("dependencies") ?: return emptyList()
 
@@ -308,11 +321,9 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         for (d in 0 until dependenciesArr.length()) {
             val dep = dependenciesArr.optJSONObject(d) ?: continue
             val inputsArr = dep.optJSONArray("inputs") ?: continue
-            if (inputsArr.length() == 0) continue
-
             val apiName = dep.optString("api_name")
                 .takeIf { it.isNotBlank() && it != "null" && it != "false" }
-                ?: if (d == 0) "predict" else "fn_$d"
+                ?: continue
 
             // Skip purely internal state/UI toggle callbacks with no real user inputs
             val params = mutableListOf<SpaceParameterSpec>()
@@ -328,9 +339,9 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                     ?: "$typeStr #${idx + 1}"
 
                 val defaultVal = props?.opt("value")?.takeIf { it != JSONObject.NULL }?.toString() ?: ""
-                val minVal = props?.optDouble("minimum", 0.0)?.toFloat() ?: 0f
-                val maxVal = props?.optDouble("maximum", 100.0)?.toFloat() ?: 100f
-                val stepVal = props?.optDouble("step", 1.0)?.toFloat() ?: 1f
+                val minVal = props?.nullableFloat("minimum")
+                val maxVal = props?.nullableFloat("maximum")
+                val stepVal = props?.nullableFloat("step")
 
                 val choices = mutableListOf<String>()
                 val choicesArr = props?.optJSONArray("choices")
@@ -338,7 +349,9 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                     for (c in 0 until choicesArr.length()) {
                         val item = choicesArr.opt(c)
                         when (item) {
-                            is JSONArray -> if (item.length() > 0) choices.add(item.optString(0))
+                            is JSONArray -> if (item.length() > 0) {
+                                choices.add(item.optString(if (item.length() > 1) 1 else 0))
+                            }
                             is String -> choices.add(item)
                             else -> if (item != null) choices.add(item.toString())
                         }
@@ -361,10 +374,11 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                         label = label,
                         componentName = typeStr.replaceFirstChar { it.uppercase() },
                         inputType = inputType,
-                        isRequired = true,
+                        isRequired = props?.has("value") != true,
                         defaultValue = defaultVal,
+                        defaultIsNull = props?.has("value") == true && props.isNull("value"),
                         min = minVal,
-                        max = maxVal.coerceAtLeast(minVal + 1f),
+                        max = maxVal,
                         step = stepVal,
                         choices = choices,
                         description = props?.optString("info") ?: ""
@@ -372,7 +386,7 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                 )
             }
 
-            if (params.isNotEmpty()) {
+            if (inputsArr.length() == 0 || params.isNotEmpty()) {
                 val outputsArr = dep.optJSONArray("outputs")
                 val outputs = mutableListOf<SpaceOutputSpec>()
                 if (outputsArr != null) {
@@ -394,6 +408,14 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         }
 
         return endpoints
+    }
+
+    private fun JSONObject.nullableFloat(key: String): Float? {
+        if (!has(key) || isNull(key)) return null
+        return optDouble(key, Double.NaN)
+            .takeIf { it.isFinite() }
+            ?.toFloat()
+            ?.takeIf { it.isFinite() }
     }
 
     private fun classifyInputType(
@@ -422,10 +444,18 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         }
     }
 
+    private fun unavailableSchema(space: HfSpace) = SpaceSchema(
+        spaceId = space.id,
+        endpoints = emptyList(),
+        isLiveFetched = false,
+        schemaSourceNote = "No verified callable Gradio endpoint is available. Wake the Space and retry, or open its web UI."
+    )
+
     /**
-     * Builds an intelligent multi-input schema when a Space is sleeping/building or custom Docker
-     * so the user still gets the exact Video/Image/Audio/File uploaders and sliders for that Space's domain.
+     * Kept for source compatibility with older callers. Metadata cannot establish a callable API,
+     * so inferred fields are never exposed as executable endpoints.
      */
+    @Deprecated("Use fetchSpaceSchema; unverified metadata is not an executable API contract")
     fun buildInferredSpaceSchema(space: HfSpace): SpaceSchema {
         val text = "${space.id} ${space.title} ${space.description} ${space.category}".lowercase()
 
@@ -716,18 +746,9 @@ class HfApiClient(private val tokenProvider: () -> String?) {
             }
         }
 
-        return SpaceSchema(
-            spaceId = space.id,
-            endpoints = listOf(
-                SpaceEndpointSpec(
-                    apiName = "predict",
-                    parameters = parameters,
-                    outputs = listOf(SpaceOutputSpec("Result", "Output"))
-                )
-            ),
-            isLiveFetched = false,
-            schemaSourceNote = "Multi-input schema configured for ${space.category} (add or customize any field below)"
-        )
+        @Suppress("UNUSED_VARIABLE")
+        val ignoredUnverifiedParameters = parameters
+        return unavailableSchema(space)
     }
 
     /**
@@ -741,7 +762,7 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         fileName: String,
         mimeType: String
     ): Result<JSONObject> = withContext(Dispatchers.IO) {
-        val baseHost = HfSpace.toSanitizedSpaceEndpoint(spaceId).trimEnd('/')
+        val baseHost = spaceEndpointResolver(spaceId).trimEnd('/')
         val uploadUrls = listOf(
             "$baseHost/gradio_api/upload",
             "$baseHost/upload"
@@ -761,6 +782,7 @@ class HfApiClient(private val tokenProvider: () -> String?) {
             .addFormDataPart("files", fileName, streamRequestBody)
             .build()
 
+        val failures = mutableListOf<String>()
         for (uploadUrl in uploadUrls) {
             try {
                 val reqBuilder = Request.Builder()
@@ -771,10 +793,15 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                     reqBuilder.header("Authorization", "Bearer $token")
                 }
 
-                client.newCall(reqBuilder.build()).execute().use { resp ->
+                executeRequest(reqBuilder.build()).use { resp ->
                     if (resp.isSuccessful) {
                         val bodyStr = resp.body?.string() ?: ""
-                        val arr = JSONArray(bodyStr)
+                        val arr = try {
+                            JSONArray(bodyStr)
+                        } catch (e: Exception) {
+                            failures += "$uploadUrl returned malformed JSON"
+                            return@use
+                        }
                         if (arr.length() > 0) {
                             val serverPath = arr.optString(0)
                             if (serverPath.isNotBlank()) {
@@ -793,21 +820,22 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                                 return@withContext Result.success(fileData)
                             }
                         }
+                        failures += "$uploadUrl returned no uploaded file path"
+                    } else {
+                        failures += "$uploadUrl returned HTTP ${resp.code}: ${resp.body?.string().orEmpty().take(300)}"
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.w(TAG, "Upload attempt to $uploadUrl failed: ${e.message}")
+                failures += "$uploadUrl failed: ${e.message ?: e::class.java.simpleName}"
             }
         }
 
-        // Return a local descriptor if remote upload endpoint wasn't reachable (e.g. cold space)
-        val fallbackFileData = JSONObject().apply {
-            put("path", fileName)
-            put("orig_name", fileName)
-            put("mime_type", mimeType)
-            put("meta", JSONObject().put("_type", "gradio.FileData"))
-        }
-        return@withContext Result.failure(Exception("Space upload endpoint unreachable for $fileName"))
+        return@withContext Result.failure(
+            IOException("Upload failed for $fileName. ${failures.joinToString("; ")}")
+        )
     }
 
     /**
@@ -824,6 +852,10 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         val dataPayload = mutableListOf<Any?>()
 
         for (input in inputs.sortedBy { it.paramIndex }) {
+            if (input.isNull) {
+                dataPayload.add(null)
+                continue
+            }
             when (input.inputType) {
                 SpaceInputType.IMAGE, SpaceInputType.VIDEO, SpaceInputType.AUDIO, SpaceInputType.FILE -> {
                     val uriStr = input.fileUri
@@ -838,30 +870,30 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                             fileName = fName,
                             mimeType = mime
                         )
-                        if (uploadRes.isSuccess) {
-                            val fileDataObj = uploadRes.getOrThrow()
-                            onProgressLog("✅ Uploaded '$fName' -> ${fileDataObj.optString("path")}")
-                            dataPayload.add(fileDataObj)
-                        } else {
-                            onProgressLog("ℹ️ Direct upload queued for '$fName'; packaging file metadata.")
-                            val fallbackFileObj = JSONObject().apply {
-                                put("path", fName)
-                                put("orig_name", fName)
-                                put("mime_type", mime)
-                                put("meta", JSONObject().put("_type", "gradio.FileData"))
-                            }
-                            dataPayload.add(fallbackFileObj)
+                        val fileDataObj = uploadRes.getOrElse { error ->
+                            val message = error.message ?: "unknown upload error"
+                            onProgressLog("❌ Upload failed for '$fName': $message")
+                            return@withContext Result.failure(error)
                         }
+                        onProgressLog("✅ Uploaded '$fName' -> ${fileDataObj.optString("path")}")
+                        dataPayload.add(fileDataObj)
+                    } else if (!uriStr.isNullOrBlank()) {
+                        return@withContext Result.failure(
+                            IllegalArgumentException("Cannot upload ${input.paramLabel} without an Android context")
+                        )
                     } else {
                         dataPayload.add(null)
                     }
                 }
                 SpaceInputType.SLIDER, SpaceInputType.NUMBER -> {
-                    if (input.numberValue % 1f == 0f) {
-                        dataPayload.add(input.numberValue.toInt())
-                    } else {
-                        dataPayload.add(input.numberValue.toDouble())
+                    val number = input.numberValue
+                    if (number == null || !number.isFinite()) {
+                        return@withContext Result.failure(
+                            IllegalArgumentException("Enter a valid number for ${input.paramLabel}")
+                        )
                     }
+                    // Retain typed 64-bit integer seeds; Float and toInt() both lose data.
+                    dataPayload.add(input.textValue.toLongOrNull() ?: number)
                 }
                 SpaceInputType.BOOLEAN -> {
                     dataPayload.add(input.booleanValue)
@@ -875,13 +907,30 @@ class HfApiClient(private val tokenProvider: () -> String?) {
         return@withContext querySpaceEndpointWithAnyPayload(spaceId, dataPayload, apiName, onProgressLog)
     }
 
+    private suspend fun executeRequest(request: Request): Response =
+        suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWith(Result.failure(e))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    continuation.resume(response) { _, cancelledResponse, _ ->
+                        cancelledResponse.close()
+                    }
+                }
+            })
+        }
+
     private suspend fun querySpaceEndpointWithAnyPayload(
         spaceId: String,
         payloadData: List<Any?>,
         apiName: String = "predict",
         onProgressLog: (String) -> Unit = {}
     ): Result<String> = withContext(Dispatchers.IO) {
-        val baseEndpoint = HfSpace.toSanitizedSpaceEndpoint(spaceId).trimEnd('/')
+        val baseEndpoint = spaceEndpointResolver(spaceId).trimEnd('/')
         val cleanApi = apiName.trimStart('/').ifBlank { "predict" }
 
         val jsonObject = JSONObject()
@@ -894,6 +943,7 @@ class HfApiClient(private val tokenProvider: () -> String?) {
 
         // 1. Try Gradio 4/5 SSE Queue Call (/gradio_api/call/<apiName> or /call/<apiName>)
         val queuePrefixes = listOf("$baseEndpoint/gradio_api/call/$cleanApi", "$baseEndpoint/call/$cleanApi")
+        val failures = mutableListOf<String>()
         for (queueUrl in queuePrefixes) {
             try {
                 val postReq = Request.Builder()
@@ -904,11 +954,19 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                     }
                     .build()
 
-                val eventId = client.newCall(postReq).execute().use { resp ->
+                val eventId = executeRequest(postReq).use { resp ->
                     if (resp.isSuccessful) {
                         val body = resp.body?.string() ?: ""
-                        JSONObject(body).optString("event_id").takeIf { it.isNotBlank() }
-                    } else null
+                        JSONObject(body).optString("event_id").takeIf { it.isNotBlank() && it != "null" }
+                            ?: return@withContext Result.failure(IOException("Space queue accepted the request without an event_id"))
+                    } else {
+                        val failure = "$queueUrl returned HTTP ${resp.code}: ${resp.body?.string().orEmpty().take(300)}"
+                        if (resp.code != 404 && resp.code != 405) {
+                            return@withContext Result.failure(IOException(failure))
+                        }
+                        failures += failure
+                        null
+                    }
                 }
 
                 if (eventId != null) {
@@ -921,28 +979,24 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                         }
                         .build()
 
-                    client.newCall(sseReq).execute().use { sseResp ->
+                    executeRequest(sseReq).use { sseResp ->
                         if (sseResp.isSuccessful) {
                             val sseBody = sseResp.body?.string() ?: ""
-                            val lines = sseBody.lines()
-                            var lastDataLine: String? = null
-                            for (line in lines) {
-                                if (line.startsWith("data:")) {
-                                    val d = line.removePrefix("data:").trim()
-                                    if (d.isNotBlank() && d != "null") {
-                                        lastDataLine = d
-                                    }
-                                }
-                            }
-                            if (!lastDataLine.isNullOrBlank()) {
-                                val wrapped = JSONObject().put("data", JSONArray(lastDataLine)).toString()
-                                return@withContext Result.success(wrapped)
-                            }
+                            return@withContext parseSseResult(sseBody)
+                        } else {
+                            return@withContext Result.failure(IOException(
+                                "$queueUrl/$eventId returned HTTP ${sseResp.code}: ${sseResp.body?.string().orEmpty().take(300)}"
+                            ))
                         }
                     }
+                } else {
+                    failures += "$queueUrl did not return an event_id"
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.d(TAG, "Queue call $queueUrl notice: ${e.message}")
+                // A submitted request may already be running; retrying can execute it twice.
+                return@withContext Result.failure(IOException("Space queue request failed", e))
             }
         }
 
@@ -958,18 +1012,57 @@ class HfApiClient(private val tokenProvider: () -> String?) {
                     requestBuilder.header("Authorization", "Bearer $token")
                 }
 
-                client.newCall(requestBuilder.build()).execute().use { response ->
+                executeRequest(requestBuilder.build()).use { response ->
                     if (response.isSuccessful) {
                         val bodyString = response.body?.string() ?: ""
                         return@withContext Result.success(bodyString)
+                    } else {
+                        val failure = "$directUrl returned HTTP ${response.code}: ${response.body?.string().orEmpty().take(300)}"
+                        if (response.code != 404 && response.code != 405) {
+                            return@withContext Result.failure(IOException(failure))
+                        }
+                        failures += failure
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Log.d(TAG, "Direct call $directUrl notice: ${e.message}")
+                return@withContext Result.failure(IOException("Space prediction request failed", e))
             }
         }
 
-        return@withContext Result.failure(Exception("Space endpoint $cleanApi requires wake-up or queue synthesis"))
+        return@withContext Result.failure(
+            IOException("Space endpoint /$cleanApi failed. ${failures.joinToString("; ")}")
+        )
+    }
+
+    internal fun parseSseResult(body: String): Result<String> {
+        var currentEvent = ""
+        val dataLines = mutableListOf<String>()
+        for (line in body.lineSequence() + sequenceOf("")) {
+            when {
+                line.isBlank() -> {
+                    val data = dataLines.joinToString("\n")
+                    if (currentEvent.equals("error", ignoreCase = true)) {
+                        return Result.failure(IOException("Gradio queue error: ${data.ifBlank { "Unknown error" }}"))
+                    }
+                    if (currentEvent.equals("complete", ignoreCase = true)) {
+                        if (data.isBlank()) return Result.failure(IOException("Gradio queue completed without result data"))
+                        return try {
+                            val parsed = org.json.JSONTokener(data).nextValue()
+                            Result.success(JSONObject().put("data", parsed).toString())
+                        } catch (e: Exception) {
+                            Result.failure(IOException("Gradio queue returned malformed result data", e))
+                        }
+                    }
+                    currentEvent = ""
+                    dataLines.clear()
+                }
+                line.startsWith("event:") -> currentEvent = line.removePrefix("event:").trim()
+                line.startsWith("data:") -> dataLines += line.removePrefix("data:").removePrefix(" ")
+            }
+        }
+        return Result.failure(IOException("Gradio queue ended before a completion event"))
     }
 
     /**

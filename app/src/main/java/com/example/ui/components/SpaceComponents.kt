@@ -480,13 +480,13 @@ fun AntiTimeoutBanner(
                 )
                 Column {
                     Text(
-                        text = "Anti-Timeout Engine Active",
+                        text = "Background execution active",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
                     Text(
-                        text = "Running on $activeSpaceTitle (Protected)",
+                        text = "Running on $activeSpaceTitle",
                         fontSize = 11.sp,
                         color = Color(0xFFA7F3D0)
                     )

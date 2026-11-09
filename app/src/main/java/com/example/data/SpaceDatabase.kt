@@ -15,6 +15,18 @@ interface SpaceDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSpaces(spaces: List<SpaceEntity>)
 
+    @Transaction
+    suspend fun cacheSpaces(spaces: List<SpaceEntity>) {
+        spaces.forEach { space ->
+            val current = getSpaceById(space.id)
+            insertSpace(space.copy(
+                isFavorite = current?.isFavorite ?: space.isFavorite,
+                isCurated = current?.isCurated ?: space.isCurated,
+                lastUsedAt = current?.lastUsedAt ?: space.lastUsedAt
+            ))
+        }
+    }
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSpace(space: SpaceEntity)
 
@@ -63,14 +75,11 @@ abstract class SpaceDatabase : RoomDatabase() {
 
         fun getDatabase(context: Context): SpaceDatabase {
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+                INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     SpaceDatabase::class.java,
                     "space_agent_db"
-                ).fallbackToDestructiveMigration()
-                    .build()
-                INSTANCE = instance
-                instance
+                ).build().also { INSTANCE = it }
             }
         }
     }

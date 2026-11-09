@@ -2,6 +2,7 @@ package com.example.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import com.example.model.HfSpace
 
 @Entity(tableName = "spaces")
 data class SpaceEntity(
@@ -35,4 +36,10 @@ data class AgentSessionEntity(
     val imageUrl: String? = null,
     val stepsJson: String = "[]",
     val executionDurationMs: Long = 0L
+)
+
+internal fun SpaceEntity.toHfSpace() = HfSpace(
+    id = id, author = author, name = name, title = title, description = description,
+    sdk = sdk, category = category, likes = likes, endpointUrl = endpointUrl,
+    isFavorite = isFavorite, isCurated = isCurated, demoPrompt = demoPrompt
 )

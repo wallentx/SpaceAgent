@@ -47,6 +47,7 @@ fun SpacesListScreen(
     val isKeepAlive by viewModel.isKeepAliveActive.collectAsState()
     val activeSpaceName by viewModel.activeSpaceName.collectAsState()
 
+    val customSpaceError by viewModel.customSpaceError.collectAsState()
     var showAddDialog by remember { mutableStateOf(false) }
     var customSpaceInput by remember { mutableStateOf("") }
     var showSortMenu by remember { mutableStateOf(false) }
@@ -378,6 +379,8 @@ fun SpacesListScreen(
                         value = customSpaceInput,
                         onValueChange = { customSpaceInput = it },
                         placeholder = { Text("author/space-name") },
+                        isError = customSpaceError != null,
+                        supportingText = { customSpaceError?.let { Text(it) } },
                         singleLine = true,
                         modifier = Modifier
                             .fillMaxWidth()
@@ -389,9 +392,10 @@ fun SpacesListScreen(
                 Button(
                     onClick = {
                         if (customSpaceInput.isNotBlank()) {
-                            viewModel.addCustomSpace(customSpaceInput)
-                            customSpaceInput = ""
-                            showAddDialog = false
+                            viewModel.addCustomSpace(customSpaceInput) {
+                                customSpaceInput = ""
+                                showAddDialog = false
+                            }
                         }
                     },
                     modifier = Modifier.testTag("confirm_add_space_btn")

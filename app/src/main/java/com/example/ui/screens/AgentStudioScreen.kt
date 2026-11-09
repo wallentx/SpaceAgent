@@ -30,7 +30,7 @@ import com.example.model.AgentType
 import com.example.model.HfSpace
 import com.example.ui.SpaceAgentViewModel
 import com.example.ui.components.AgentStepRow
-import com.example.ui.components.CodeBlockView
+import com.example.ui.components.SpaceOutputView
 import com.example.ui.components.DynamicSpaceInputsSection
 import com.example.ui.theme.*
 
@@ -45,6 +45,8 @@ fun AgentStudioScreen(
     val selectedAgentType by viewModel.selectedAgentType.collectAsState()
     val goalPrompt by viewModel.agentGoalPrompt.collectAsState()
     val isRunning by viewModel.isTaskRunning.collectAsState()
+    val isEndpointReady by viewModel.isEndpointReady.collectAsState()
+    val isInteractiveExecuting by viewModel.isInteractiveExecuting.collectAsState()
     val currentSteps by viewModel.currentSteps.collectAsState()
     val liveLogs by viewModel.liveLogs.collectAsState()
     val currentSession by viewModel.currentSession.collectAsState()
@@ -183,7 +185,7 @@ fun AgentStudioScreen(
                 )
                 Column {
                     Text(
-                        text = "Zero-Timeout Background Engine",
+                        text = "Background Execution",
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp,
                         color = Color.White
@@ -254,7 +256,7 @@ fun AgentStudioScreen(
         ) {
             Button(
                 onClick = { viewModel.startAgentExecution(context) },
-                enabled = !isRunning && (goalPrompt.isNotBlank() || inputValues.isNotEmpty()),
+                enabled = !isRunning && !isInteractiveExecuting && isEndpointReady,
                 modifier = Modifier
                     .weight(1f)
                     .height(50.dp)
@@ -425,7 +427,7 @@ fun AgentStudioScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "ARTIFACT READY",
+                            text = if (session.status == "COMPLETED") "RESULT READY" else session.status,
                             fontWeight = FontWeight.Bold,
                             fontSize = 11.sp,
                             color = EmeraldSuccess
@@ -449,22 +451,7 @@ fun AgentStudioScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    if (session.finalOutput.contains("```")) {
-                        val codePart = session.finalOutput.substringAfter("```python\n")
-                            .substringBefore("```")
-                            .ifBlank {
-                                session.finalOutput.substringAfter("```").substringBefore("```")
-                            }
-                        CodeBlockView(code = codePart)
-                        Spacer(modifier = Modifier.height(10.dp))
-                    }
-
-                    Text(
-                        text = session.finalOutput,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        lineHeight = 20.sp
-                    )
+                    SpaceOutputView(session.finalOutput)
                 }
             }
         }

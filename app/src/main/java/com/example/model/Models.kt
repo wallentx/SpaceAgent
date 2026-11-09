@@ -115,9 +115,10 @@ data class SpaceParameterSpec(
     val inputType: SpaceInputType,
     val isRequired: Boolean = true,
     val defaultValue: String = "",
-    val min: Float = 0f,
-    val max: Float = 100f,
-    val step: Float = 1f,
+    val defaultIsNull: Boolean = false,
+    val min: Float? = null,
+    val max: Float? = null,
+    val step: Float? = null,
     val choices: List<String> = emptyList(),
     val description: String = ""
 )
@@ -146,14 +147,16 @@ data class SpaceInputValue(
     val paramLabel: String,
     val inputType: SpaceInputType,
     val textValue: String = "",
-    val numberValue: Float = 0f,
+    val numberValue: Double? = null,
     val booleanValue: Boolean = false,
+    val isNull: Boolean = false,
     val fileUri: String? = null,
     val fileName: String? = null,
     val fileSizeBytes: Long = 0L,
     val mimeType: String? = null
 ) {
     fun toDisplaySummary(): String {
+        if (isNull) return "$paramLabel: (no value)"
         return when (inputType) {
             SpaceInputType.IMAGE, SpaceInputType.VIDEO, SpaceInputType.AUDIO, SpaceInputType.FILE -> {
                 if (!fileName.isNullOrBlank()) {
@@ -163,7 +166,9 @@ data class SpaceInputValue(
                 }
             }
             SpaceInputType.SLIDER, SpaceInputType.NUMBER -> {
-                val formatted = if (numberValue % 1f == 0f) numberValue.toInt().toString() else String.format("%.2f", numberValue)
+                val formatted = if (numberValue?.isFinite() == true) {
+                    textValue.ifBlank { numberValue.toString() }
+                } else "(empty)"
                 "🎚️ $paramLabel: $formatted"
             }
             SpaceInputType.BOOLEAN -> "☑️ $paramLabel: $booleanValue"
@@ -179,8 +184,9 @@ data class SpaceInputValue(
             put("paramLabel", paramLabel)
             put("inputType", inputType.name)
             put("textValue", textValue)
-            put("numberValue", numberValue.toDouble())
+            put("numberValue", numberValue?.takeIf { it.isFinite() } ?: JSONObject.NULL)
             put("booleanValue", booleanValue)
+            put("isNull", isNull)
             put("fileUri", fileUri ?: "")
             put("fileName", fileName ?: "")
             put("fileSizeBytes", fileSizeBytes)
@@ -202,8 +208,9 @@ data class SpaceInputValue(
                 paramLabel = obj.optString("paramLabel", "Input"),
                 inputType = inputType,
                 textValue = obj.optString("textValue", ""),
-                numberValue = obj.optDouble("numberValue", 0.0).toFloat(),
+                numberValue = obj.optDouble("numberValue", Double.NaN).takeIf { it.isFinite() },
                 booleanValue = obj.optBoolean("booleanValue", false),
+                isNull = obj.optBoolean("isNull", false),
                 fileUri = obj.optString("fileUri", "").takeIf { it.isNotBlank() },
                 fileName = obj.optString("fileName", "").takeIf { it.isNotBlank() },
                 fileSizeBytes = obj.optLong("fileSizeBytes", 0L),

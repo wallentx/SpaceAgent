@@ -49,12 +49,10 @@ fun DynamicSpaceInputsSection(
     val parameterSpecs by viewModel.currentEndpointSpecs.collectAsState()
     val inputValues by viewModel.currentInputValues.collectAsState()
     val selectedSpace by viewModel.selectedSpaceForAgent.collectAsState()
+    val inputErrors by viewModel.inputErrors.collectAsState()
+    val executionError by viewModel.executionError.collectAsState()
 
-    var activeFilePickerParamIndex by remember { mutableIntStateOf(-1) }
-    var showAddFieldDialog by remember { mutableStateOf(false) }
-    var customFieldLabel by remember { mutableStateOf("") }
-    var customFieldType by remember { mutableStateOf(SpaceInputType.VIDEO) }
-
+    var activeFilePickerParamIndex by androidx.compose.runtime.saveable.rememberSaveable { mutableIntStateOf(-1) }
     // Zero-permission Photo/Video Picker
     val visualMediaLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -115,7 +113,7 @@ fun DynamicSpaceInputsSection(
                         }
                         Column {
                             Text(
-                                text = "1:1 SPACE INPUT PARAMETERS (${parameterSpecs.size})",
+                                text = "SPACE INPUT PARAMETERS (${parameterSpecs.size})",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.Monospace,
@@ -144,20 +142,7 @@ fun DynamicSpaceInputsSection(
                             )
                         }
 
-                        FilledTonalButton(
-                            onClick = { showAddFieldDialog = true },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.testTag("add_custom_input_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Add,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Add Input", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
+
                     }
                 }
 
@@ -211,6 +196,7 @@ fun DynamicSpaceInputsSection(
                 onTextChange = { viewModel.updateTextInput(spec.index, it) },
                 onNumberChange = { viewModel.updateNumberInput(spec.index, it) },
                 onBooleanChange = { viewModel.updateBooleanInput(spec.index, it) },
+                onNullChange = { viewModel.setInputNull(spec.index, it) },
                 onPickVisualMedia = { mediaType ->
                     activeFilePickerParamIndex = spec.index
                     visualMediaLauncher.launch(PickVisualMediaRequest(mediaType))
@@ -223,87 +209,11 @@ fun DynamicSpaceInputsSection(
                     viewModel.updateFileInputFromUri(context, spec.index, null)
                 }
             )
+            inputErrors[spec.index]?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
         }
+        executionError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
 
-    if (showAddFieldDialog) {
-        AlertDialog(
-            onDismissRequest = { showAddFieldDialog = false },
-            title = {
-                Text("Add Space Input Parameter", fontWeight = FontWeight.Bold)
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "Add a file uploader (Video, Image, Audio, File) or parameter field to send to this Space:",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    OutlinedTextField(
-                        value = customFieldLabel,
-                        onValueChange = { customFieldLabel = it },
-                        label = { Text("Parameter Label (e.g. Input Video)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Text(
-                        text = "Input Type:",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(
-                            SpaceInputType.VIDEO,
-                            SpaceInputType.IMAGE,
-                            SpaceInputType.AUDIO,
-                            SpaceInputType.FILE,
-                            SpaceInputType.TEXT,
-                            SpaceInputType.SLIDER,
-                            SpaceInputType.BOOLEAN
-                        ).chunked(2).forEach { rowTypes ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                rowTypes.forEach { t ->
-                                    FilterChip(
-                                        selected = customFieldType == t,
-                                        onClick = { customFieldType = t },
-                                        label = {
-                                            Text("${t.iconEmoji} ${t.displayName}", fontSize = 11.sp)
-                                        },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.addCustomParameter(
-                            label = customFieldLabel.ifBlank { customFieldType.displayName },
-                            inputType = customFieldType
-                        )
-                        customFieldLabel = ""
-                        showAddFieldDialog = false
-                    }
-                ) {
-                    Text("Add Field")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddFieldDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
 }
 
 @Composable
@@ -311,8 +221,9 @@ private fun SpaceParameterInputCard(
     spec: SpaceParameterSpec,
     value: SpaceInputValue,
     onTextChange: (String) -> Unit,
-    onNumberChange: (Float) -> Unit,
+    onNumberChange: (String) -> Unit,
     onBooleanChange: (Boolean) -> Unit,
+    onNullChange: (Boolean) -> Unit,
     onPickVisualMedia: (ActivityResultContracts.PickVisualMedia.VisualMediaType) -> Unit,
     onPickDocument: (Array<String>) -> Unit,
     onClearFile: () -> Unit
@@ -383,7 +294,18 @@ private fun SpaceParameterInputCard(
                 )
             }
 
-            when (spec.inputType) {
+            if (!spec.isRequired && spec.defaultIsNull) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Use a value", fontSize = 13.sp)
+                    Switch(checked = !value.isNull, onCheckedChange = { onNullChange(!it) })
+                }
+            }
+
+            if (!value.isNull) when (spec.inputType) {
                 SpaceInputType.VIDEO -> {
                     MediaUploadBox(
                         inputType = SpaceInputType.VIDEO,
@@ -446,61 +368,32 @@ private fun SpaceParameterInputCard(
                     )
                 }
 
-                SpaceInputType.SLIDER -> {
-                    val formattedVal = if (spec.step >= 1f && value.numberValue % 1f == 0f) {
-                        value.numberValue.toInt().toString()
-                    } else {
-                        String.format("%.2f", value.numberValue)
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Range: ${spec.min} – ${spec.max}",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shape = RoundedCornerShape(6.dp)
-                        ) {
-                            Text(
-                                text = formattedVal,
-                                fontSize = 12.sp,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-                    Slider(
-                        value = value.numberValue.coerceIn(spec.min, spec.max.coerceAtLeast(spec.min + 0.01f)),
-                        onValueChange = onNumberChange,
-                        valueRange = spec.min..spec.max.coerceAtLeast(spec.min + 0.01f)
-                    )
-                }
-
-                SpaceInputType.NUMBER -> {
-                    var numText by remember(value.numberValue) {
-                        mutableStateOf(
-                            if (value.numberValue % 1f == 0f) value.numberValue.toInt().toString()
-                            else value.numberValue.toString()
+                SpaceInputType.SLIDER, SpaceInputType.NUMBER -> {
+                    val min = spec.min
+                    val max = spec.max
+                    val step = spec.step
+                    if (spec.inputType == SpaceInputType.SLIDER && min != null && max != null && max > min) {
+                        Text("${min} – ${max}", fontSize = 12.sp)
+                        Slider(
+                            value = value.numberValue?.takeIf { it.isFinite() }
+                                ?.coerceIn(min.toDouble(), max.toDouble())?.toFloat() ?: min,
+                            onValueChange = { raw ->
+                                val rounded = if (step != null && step > 0f)
+                                    min + kotlin.math.round((raw - min) / step) * step else raw
+                                onNumberChange(rounded.coerceIn(min, max).toString())
+                            },
+                            valueRange = min..max
                         )
                     }
-                    OutlinedTextField(
-                        value = numText,
-                        onValueChange = { str ->
-                            numText = str
-                            str.toFloatOrNull()?.let { onNumberChange(it) }
-                        },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        singleLine = true,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                        OutlinedTextField(
+                            value = value.textValue,
+                            onValueChange = onNumberChange,
+                            isError = value.textValue.isNotBlank() && value.numberValue?.isFinite() != true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
                 }
 
                 SpaceInputType.BOOLEAN -> {

@@ -61,6 +61,8 @@ fun WebSpaceScreen(
     }
 
     val currentSpace = space!!
+    val isEndpointReady by viewModel.isEndpointReady.collectAsState()
+    val isAgentRunning by viewModel.isTaskRunning.collectAsState()
     val currentApiName = viewModel.getCurrentApiName()
 
     Column(
@@ -207,7 +209,7 @@ fun WebSpaceScreen(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         Text(
-                            text = if (isKeepAliveActive) "Keep-Alive ON" else "Anti-Timeout",
+                            text = if (isKeepAliveActive) "Background ON" else "Background mode",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = if (isKeepAliveActive) EmeraldSuccess else MaterialTheme.colorScheme.onSurfaceVariant
@@ -240,7 +242,7 @@ fun WebSpaceScreen(
                         modifier = Modifier.size(16.dp)
                     )
                     Text(
-                        text = "Anti-Timeout Active: Space sockets kept alive even if you switch away from the app.",
+                        text = "Background mode is on. Android or the Space can still stop a request.",
                         fontSize = 11.sp,
                         color = Color.White
                     )
@@ -315,7 +317,7 @@ fun WebSpaceScreen(
                 ) {
                     Button(
                         onClick = { viewModel.executeInteractiveSpaceCall(context) },
-                        enabled = !isInteractiveExecuting,
+                        enabled = !isInteractiveExecuting && !isAgentRunning && isEndpointReady,
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp)
@@ -342,6 +344,7 @@ fun WebSpaceScreen(
                             viewModel.startAgentExecution(context)
                             viewModel.navigateTo(AppScreen.AGENT_STUDIO)
                         },
+                        enabled = !isInteractiveExecuting && !isAgentRunning && isEndpointReady,
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp),
