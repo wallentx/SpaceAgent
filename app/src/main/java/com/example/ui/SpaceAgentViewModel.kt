@@ -291,7 +291,11 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     fun setInputNull(paramIndex: Int, isNull: Boolean) {
         val spec = _currentEndpointSpecs.value.firstOrNull { it.index == paramIndex } ?: return
-        if (!spec.isRequired && spec.defaultIsNull) updateInput(paramIndex) { it.copy(isNull = isNull) }
+        if (!spec.isRequired && spec.defaultIsNull) updateInput(paramIndex) {
+            if (isNull && it.inputType.isMediaOrFile) {
+                it.copy(isNull = true, fileUri = null, fileName = null, fileSizeBytes = 0L, mimeType = null)
+            } else it.copy(isNull = isNull)
+        }
     }
 
     private fun updateInput(paramIndex: Int, transform: (SpaceInputValue) -> SpaceInputValue) {
