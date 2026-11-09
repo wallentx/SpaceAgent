@@ -188,13 +188,19 @@ class SpaceAgentExecutionService : Service() {
                     )
                 }
             } finally {
-                if (activeSessionId == sessionId) activeSessionId = null
-                agentJob = null
-                stopIfIdle()
+                finishAgentSession(sessionId)
             }
         }.also { job ->
             job.invokeOnCompletion { InputUriAccess.release(InputUriAccess.sessionOwner(sessionId)) }
         }
+    }
+
+    internal fun finishAgentSession(sessionId: String) {
+        // A cancelled coroutine can finish after its replacement has already started.
+        if (activeSessionId != sessionId) return
+        activeSessionId = null
+        agentJob = null
+        stopIfIdle()
     }
 
     private fun cancelAgent(sessionId: String?) {
