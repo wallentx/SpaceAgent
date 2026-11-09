@@ -32,6 +32,7 @@ import com.example.model.HfSpace
 import com.example.model.StepStatus
 import com.example.ui.theme.*
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SpaceCard(
     space: HfSpace,
@@ -43,6 +44,7 @@ fun SpaceCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
+            .clickable { onOpenWeb(space) }
             .testTag("space_card_${space.id.replace('/', '_')}"),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
@@ -61,9 +63,9 @@ fun SpaceCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
+                FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.weight(1f)
                 ) {
                     RuntimeStatusBadge(
@@ -90,7 +92,7 @@ fun SpaceCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (space.trendingScore > 0) {
                         Text(
-                            text = "🔥${space.trendingScore}",
+                            text = "Trending",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = HfYellow,
@@ -114,7 +116,7 @@ fun SpaceCard(
                     IconButton(
                         onClick = { onToggleFavorite(space) },
                         modifier = Modifier
-                            .size(30.dp)
+                            .size(48.dp)
                             .testTag("favorite_btn_${space.id.replace('/', '_')}")
                     ) {
                         Icon(
@@ -150,7 +152,7 @@ fun SpaceCard(
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
@@ -166,7 +168,7 @@ fun SpaceCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text(
+            if (space.description.isNotBlank()) Text(
                 text = space.description,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -182,14 +184,31 @@ fun SpaceCard(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Button(
-                    onClick = { onOpenAgent(space) },
+                    onClick = { onOpenWeb(space) },
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("open_agent_btn_${space.id.replace('/', '_')}"),
+                        .testTag("open_web_btn_${space.id.replace('/', '_')}"),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary
                     ),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(vertical = 10.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.OpenInNew,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(text = "Open Space", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+
+                OutlinedButton(
+                    onClick = { onOpenAgent(space) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("open_agent_btn_${space.id.replace('/', '_')}"),
                     shape = RoundedCornerShape(10.dp),
                     contentPadding = PaddingValues(vertical = 10.dp)
                 ) {
@@ -199,24 +218,7 @@ fun SpaceCard(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "Agent Mode", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                }
-
-                OutlinedButton(
-                    onClick = { onOpenWeb(space) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("open_web_btn_${space.id.replace('/', '_')}"),
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(vertical = 10.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Terminal,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "Interactive", fontSize = 13.sp)
+                    Text(text = "Run task", fontSize = 13.sp)
                 }
             }
         }
@@ -244,11 +246,12 @@ fun RuntimeStatusBadge(stage: String, isZeroGpu: Boolean) {
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     val label = when {
-        isZeroGpu -> "⚡ ZeroGPU"
+        isZeroGpu && isRunning -> "Running on ZeroGPU"
         isRunning -> "🟢 Running"
         stage.contains("BUILD", ignoreCase = true) -> "🔨 Building"
         stage.contains("SLEEP", ignoreCase = true) -> "💤 Sleeping"
-        else -> stage.take(10)
+        stage.isBlank() || stage.equals("UNKNOWN", true) -> "Status unknown"
+        else -> stage.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }
     }
 
     Surface(
@@ -384,7 +387,7 @@ fun AgentStepRow(step: AgentStep) {
 }
 
 @Composable
-fun CodeBlockView(code: String) {
+fun CodeBlockView(code: String, title: String = "Code") {
     val context = LocalContext.current
     Card(
         modifier = Modifier
@@ -403,7 +406,7 @@ fun CodeBlockView(code: String) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "GENERATED CODE",
+                    text = title,
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,

@@ -1,0 +1,280 @@
+{
+  "version": "6.27.0",
+  "components": [
+    {
+      "id": 1,
+      "type": "markdown",
+      "props": {
+        "value": "# Real-ESRGAN AI Upscaler",
+        "visible": true
+      }
+    },
+    {
+      "id": 2,
+      "type": "tabitem",
+      "props": {
+        "label": "Image Upscale",
+        "visible": true,
+        "interactive": true
+      }
+    },
+    {
+      "id": 3,
+      "type": "row",
+      "props": {
+        "visible": true
+      }
+    },
+    {
+      "id": 4,
+      "type": "image",
+      "props": {
+        "sources": [
+          "upload",
+          "webcam",
+          "clipboard"
+        ],
+        "type": "numpy",
+        "label": "Input Image",
+        "visible": true
+      }
+    },
+    {
+      "id": 5,
+      "type": "file",
+      "props": {
+        "type": "filepath",
+        "label": "Download Upscaled Image",
+        "visible": true
+      }
+    },
+    {
+      "id": 6,
+      "type": "radio",
+      "props": {
+        "choices": [
+          [
+            "2x",
+            "2x"
+          ],
+          [
+            "4x",
+            "4x"
+          ],
+          [
+            "8x",
+            "8x"
+          ]
+        ],
+        "value": "4x",
+        "type": "value",
+        "label": "Upscale Factor",
+        "visible": true
+      }
+    },
+    {
+      "id": 7,
+      "type": "button",
+      "props": {
+        "value": "Upscale Image",
+        "visible": true,
+        "interactive": true
+      }
+    },
+    {
+      "id": 8,
+      "type": "form",
+      "props": {}
+    },
+    {
+      "id": 9,
+      "type": "tabitem",
+      "props": {
+        "label": "Video Upscale",
+        "visible": true,
+        "interactive": true
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "props": {
+        "visible": true
+      }
+    },
+    {
+      "id": 11,
+      "type": "video",
+      "props": {
+        "sources": [
+          "upload",
+          "webcam"
+        ],
+        "label": "Input Video",
+        "visible": true
+      }
+    },
+    {
+      "id": 12,
+      "type": "video",
+      "props": {
+        "sources": [
+          "upload",
+          "webcam"
+        ],
+        "label": "Upscaled Video",
+        "visible": true
+      }
+    },
+    {
+      "id": 13,
+      "type": "radio",
+      "props": {
+        "choices": [
+          [
+            "2x",
+            "2x"
+          ],
+          [
+            "4x",
+            "4x"
+          ],
+          [
+            "8x",
+            "8x"
+          ]
+        ],
+        "value": "2x",
+        "type": "value",
+        "label": "Upscale Factor",
+        "visible": true
+      }
+    },
+    {
+      "id": 14,
+      "type": "button",
+      "props": {
+        "value": "Upscale Video",
+        "visible": true,
+        "interactive": true
+      }
+    },
+    {
+      "id": 15,
+      "type": "form",
+      "props": {}
+    },
+    {
+      "id": 16,
+      "type": "tabs",
+      "props": {
+        "visible": true
+      }
+    }
+  ],
+  "layout": {
+    "id": 0,
+    "children": [
+      {
+        "id": 1
+      },
+      {
+        "id": 16,
+        "children": [
+          {
+            "id": 2,
+            "children": [
+              {
+                "id": 3,
+                "children": [
+                  {
+                    "id": 4
+                  },
+                  {
+                    "id": 5
+                  }
+                ]
+              },
+              {
+                "id": 8,
+                "children": [
+                  {
+                    "id": 6
+                  }
+                ]
+              },
+              {
+                "id": 7
+              }
+            ]
+          },
+          {
+            "id": 9,
+            "children": [
+              {
+                "id": 10,
+                "children": [
+                  {
+                    "id": 11
+                  },
+                  {
+                    "id": 12
+                  }
+                ]
+              },
+              {
+                "id": 15,
+                "children": [
+                  {
+                    "id": 13
+                  }
+                ]
+              },
+              {
+                "id": 14
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "targets": [
+        [
+          7,
+          "click"
+        ]
+      ],
+      "inputs": [
+        4,
+        6
+      ],
+      "outputs": [
+        5
+      ],
+      "backend_fn": true,
+      "api_name": "upscale_image",
+      "api_visibility": "public"
+    },
+    {
+      "targets": [
+        [
+          14,
+          "click"
+        ]
+      ],
+      "inputs": [
+        11,
+        13
+      ],
+      "outputs": [
+        12
+      ],
+      "backend_fn": true,
+      "api_name": "process_video",
+      "api_visibility": "public"
+    }
+  ]
+}

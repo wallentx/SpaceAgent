@@ -16,6 +16,9 @@ import com.example.model.AgentType
 import com.example.model.HfSpace
 import com.example.model.SpaceCategoryFilter
 import com.example.model.SpaceInputValue
+import com.example.model.SpaceExecutionState
+import com.example.model.SpaceResultFile
+import com.example.model.SessionStatus
 import com.example.model.SpaceParameterSpec
 import com.example.model.SpaceRuntimeFilter
 import com.example.model.SpaceSchema
@@ -114,6 +117,15 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _interactiveOutput = MutableStateFlow<String?>(null)
     val interactiveOutput: StateFlow<String?> = _interactiveOutput.asStateFlow()
+    private val _interactiveState = MutableStateFlow<SpaceExecutionState?>(null)
+    val interactiveState = _interactiveState.asStateFlow()
+    private val _downloadMessage = MutableStateFlow<String?>(null)
+    val downloadMessage = _downloadMessage.asStateFlow()
+    private val _isSavingResult = MutableStateFlow(false)
+    val isSavingResult = _isSavingResult.asStateFlow()
+    private var interactiveJob: Job? = null
+    private var interactiveRequestId = 0L
+    private var detailsJob: Job? = null
 
     private val _isInteractiveExecuting = MutableStateFlow(false)
     val isInteractiveExecuting: StateFlow<Boolean> = _isInteractiveExecuting.asStateFlow()
@@ -153,6 +165,13 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     val liveSyncStatus: StateFlow<String> = _liveSyncStatus.asStateFlow()
 
     private var fetchJob: Job? = null
+    private var fetchMoreJob: Job? = null
+    private var browserGeneration = 0L
+    private var nextSpacesPage: String? = null
+    private val _canLoadMoreSpaces = MutableStateFlow(false)
+    val canLoadMoreSpaces = _canLoadMoreSpaces.asStateFlow()
+    private val _isLoadingMoreSpaces = MutableStateFlow(false)
+    val isLoadingMoreSpaces = _isLoadingMoreSpaces.asStateFlow()
     private var schemaJob: Job? = null
 
     // Database Flows
@@ -375,33 +394,104 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
         val space = _selectedWebSpace.value ?: _selectedSpaceForAgent.value
         if (_isInteractiveExecuting.value || isTaskRunning.value || !validateExecution(space)) return
         val apiName = getCurrentApiName()
+        val endpoint = _activeSpaceSchema.value!!.endpoints[_selectedEndpointIndex.value]
         val inputs = _currentInputValues.value
+        val requestId = ++interactiveRequestId
         val executionInputOwner = Any()
         InputUriAccess.retain(context, executionInputOwner, inputs)
         _isInteractiveExecuting.value = true
-        _interactiveOutput.value = "Executing /$apiName on ${space.id}…"
-        viewModelScope.launch {
+        _interactiveOutput.value = null
+        _interactiveState.value = SpaceExecutionState(space.id, apiName, SessionStatus.RUNNING, "Starting…")
+        interactiveJob = viewModelScope.launch {
             try {
                 val result = apiClient.executeSpaceWithInputs(
                     context.applicationContext, space.id, apiName, inputs,
-                    onProgressLog = { _interactiveOutput.value = it }
+                    onProgressLog = { log ->
+                        viewModelScope.launch {
+                            if (requestId == interactiveRequestId) {
+                                val message = when {
+                                    log.contains("Uploading", true) -> "Uploading your file…"
+                                    log.contains("Queued", true) -> "Waiting for the Space to finish…"
+                                    log.contains("Uploaded", true) -> "File uploaded. Processing…"
+                                    else -> "Processing…"
+                                }
+                                _interactiveState.value = _interactiveState.value?.let {
+                                    it.copy(message = message, details = (it.details + log).takeLast(100))
+                                }
+                            }
+                        }
+                    }
                 )
-                _interactiveOutput.value = result.fold(
-                    onSuccess = { "Response from ${space.id} (/$apiName):\n$it" },
-                    onFailure = { "Execution failed: ${it.message ?: "Unknown error"}" }
-                )
+                val raw = result.getOrThrow()
+                if (requestId == interactiveRequestId) {
+                    val parsed = SpaceResultParser.parse(raw, space, endpoint)
+                    _interactiveOutput.value = raw
+                    _interactiveState.value = SpaceExecutionState(space.id, apiName, SessionStatus.COMPLETED,
+                        "Completed", parsed, _interactiveState.value?.details.orEmpty())
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                _interactiveOutput.value = "Execution failed: ${error.message ?: "Unknown error"}"
+                if (requestId == interactiveRequestId) {
+                    _interactiveState.value = SpaceExecutionState(space.id, apiName, SessionStatus.FAILED,
+                        error.message ?: "The Space could not complete this request.", details = _interactiveState.value?.details.orEmpty())
+                }
             } finally {
-                _isInteractiveExecuting.value = false
+                if (requestId == interactiveRequestId) _isInteractiveExecuting.value = false
             }
         }.invokeOnCompletion { InputUriAccess.release(executionInputOwner) }
     }
 
+    fun cancelInteractiveExecution() {
+        ++interactiveRequestId
+        interactiveJob?.cancel()
+        _isInteractiveExecuting.value = false
+        _interactiveState.value = _interactiveState.value?.copy(status = SessionStatus.CANCELLED, message = "Cancelled")
+    }
+
+    fun saveResultFile(file: SpaceResultFile, spaceOrigin: String, destination: Uri) {
+        if (_isSavingResult.value || destination.scheme != "content") return
+        _isSavingResult.value = true
+        _downloadMessage.value = "Saving ${file.name}…"
+        viewModelScope.launch {
+            try {
+                val result = apiClient.saveResultFile(file.url, spaceOrigin) {
+                    getApplication<Application>().contentResolver.openOutputStream(destination, "w")
+                        ?: error("Could not open the selected destination.")
+                }
+                _downloadMessage.value = result.fold(
+                    onSuccess = { "Saved ${file.name}" },
+                    onFailure = { "Could not save ${file.name}: ${it.message.orEmpty()}" }
+                )
+            } finally {
+                _isSavingResult.value = false
+            }
+        }
+    }
+
+    private fun refreshSpaceDetails(space: HfSpace) {
+        detailsJob?.cancel()
+        detailsJob = viewModelScope.launch {
+            val details = apiClient.fetchSpaceDetails(space) ?: return@launch
+            if (_selectedWebSpace.value?.id == details.id) {
+                _selectedWebSpace.value = details.copy(isFavorite = _selectedWebSpace.value!!.isFavorite)
+            }
+            if (_selectedSpaceForAgent.value.id == details.id) {
+                _selectedSpaceForAgent.value = details.copy(isFavorite = _selectedSpaceForAgent.value.isFavorite)
+            }
+            _liveSpaces.value = _liveSpaces.value.map {
+                if (it.id == details.id) details.copy(isFavorite = it.isFavorite) else it
+            }
+        }
+    }
+
     fun refreshLiveSpaces(immediate: Boolean = true) {
         fetchJob?.cancel()
+        fetchMoreJob?.cancel()
+        ++browserGeneration
+        nextSpacesPage = null
+        _canLoadMoreSpaces.value = false
+        _isLoadingMoreSpaces.value = false
         fetchJob = viewModelScope.launch {
             if (!immediate) {
                 delay(350)
@@ -439,7 +529,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
                 return@launch
             }
 
-            val result = apiClient.fetchLiveSpaces(
+            val result = apiClient.fetchSpacesPage(
                 query = _searchQuery.value,
                 categoryFilter = _selectedCategoryFilter.value,
                 sdkFilter = _selectedSdkFilter.value,
@@ -449,7 +539,10 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
                 limit = 50
             )
 
-            result.onSuccess { fetched ->
+            result.onSuccess { page ->
+                val fetched = page.spaces
+                nextSpacesPage = page.nextPageUrl
+                _canLoadMoreSpaces.value = nextSpacesPage != null
                 _liveSpaces.value = fetched
                 _liveSyncStatus.value = "Live • ${fetched.size} Spaces from huggingface.co/spaces"
                 val toCache = fetched.take(15).map { s ->
@@ -497,6 +590,34 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    fun loadMoreSpaces() {
+        val next = nextSpacesPage ?: return
+        if (_isLoadingMoreSpaces.value || _isLoadingLiveSpaces.value || _selectedRuntimeFilter.value == SpaceRuntimeFilter.SAVED) return
+        val generation = browserGeneration
+        _isLoadingMoreSpaces.value = true
+        fetchMoreJob = viewModelScope.launch {
+            try {
+                val favorites = spaceDao.getAllSpaces().first().filter { it.isFavorite }.map { it.id }.toSet()
+                val result = apiClient.fetchSpacesPage(_searchQuery.value, _selectedCategoryFilter.value,
+                    _selectedSdkFilter.value, _selectedRuntimeFilter.value, _selectedSortOption.value,
+                    favorites, pageUrl = next)
+                if (generation != browserGeneration) return@launch
+                result.onSuccess { page ->
+                    _liveSpaces.value = (_liveSpaces.value + page.spaces).distinctBy { it.id }
+                    nextSpacesPage = page.nextPageUrl
+                    _canLoadMoreSpaces.value = nextSpacesPage != null
+                    _liveSyncStatus.value = "${_liveSpaces.value.size} Spaces loaded"
+                }.onFailure { _liveSyncStatus.value = "Could not load more Spaces. Try again." }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (generation == browserGeneration) _liveSyncStatus.value = "Could not load more Spaces. Try again."
+            } finally {
+                if (generation == browserGeneration) _isLoadingMoreSpaces.value = false
+            }
+        }
+    }
+
     fun setSearchQuery(query: String) {
         _searchQuery.value = query
         refreshLiveSpaces(immediate = false)
@@ -529,7 +650,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     fun openSpaceInWeb(space: HfSpace) {
         _selectedWebSpace.value = space
         _selectedSpaceForAgent.value = space
-        _interactiveOutput.value = null
+        refreshSpaceDetails(space)
         loadSchemaForSpace(space)
         _currentScreen.value = AppScreen.WEB_VIEW
     }
@@ -537,6 +658,7 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
     fun openSpaceInAgent(space: HfSpace) {
         _selectedSpaceForAgent.value = space
         _selectedWebSpace.value = space
+        refreshSpaceDetails(space)
         val catLower = space.category.lowercase()
         _selectedAgentType.value = when {
             catLower.contains("reason") || catLower.contains("agent") -> AgentType.REASONING
@@ -603,6 +725,8 @@ class SpaceAgentViewModel(application: Application) : AndroidViewModel(applicati
 
     fun toggleFavorite(space: HfSpace) {
         val newFav = !space.isFavorite
+        if (_selectedWebSpace.value?.id == space.id) _selectedWebSpace.value = _selectedWebSpace.value?.copy(isFavorite = newFav)
+        if (_selectedSpaceForAgent.value.id == space.id) _selectedSpaceForAgent.value = _selectedSpaceForAgent.value.copy(isFavorite = newFav)
         _liveSpaces.value = _liveSpaces.value.map {
             if (it.id == space.id) it.copy(isFavorite = newFav) else it
         }

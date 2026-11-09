@@ -34,6 +34,8 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import com.example.model.SpacePage
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 class HfApiClient(
     private val client: OkHttpClient = createDefaultClient(),
@@ -68,10 +70,26 @@ class HfApiClient(
         sortOption: SpaceSortOption = SpaceSortOption.TRENDING,
         favoriteIds: Set<String> = emptySet(),
         limit: Int = 50
-    ): Result<List<HfSpace>> = withContext(Dispatchers.IO) {
-        val effectiveSearch = buildSearchQuery(query, categoryFilter)
+    ): Result<List<HfSpace>> = fetchSpacesPage(query, categoryFilter, sdkFilter, runtimeFilter,
+        sortOption, favoriteIds, limit).map { it.spaces }
 
-        val urlBuilder = StringBuilder("$hubApiBase/spaces?full=true&limit=$limit&sort=${sortOption.apiSortKey}&direction=-1")
+    suspend fun fetchSpacesPage(
+        query: String = "",
+        categoryFilter: SpaceCategoryFilter = SpaceCategoryFilter.ALL,
+        sdkFilter: SpaceSdkFilter = SpaceSdkFilter.ALL,
+        runtimeFilter: SpaceRuntimeFilter = SpaceRuntimeFilter.ALL,
+        sortOption: SpaceSortOption = SpaceSortOption.TRENDING,
+        favoriteIds: Set<String> = emptySet(),
+        limit: Int = 50,
+        pageUrl: String? = null
+    ): Result<SpacePage> = withContext(Dispatchers.IO) {
+        val effectiveSearch = buildSearchQuery(query)
+
+        val urlBuilder = StringBuilder("$hubApiBase/spaces?limit=$limit&sort=${sortOption.apiSortKey}&direction=-1")
+        // full=true omits runtime; expanded metadata includes the actual hardware and state.
+        listOf("runtime", "cardData", "sdk", "likes", "trendingScore", "lastModified", "tags", "subdomain").forEach {
+            urlBuilder.append("&expand=").append(it)
+        }
         if (effectiveSearch.isNotBlank()) {
             urlBuilder.append("&search=").append(URLEncoder.encode(effectiveSearch, "UTF-8"))
         }
@@ -79,7 +97,11 @@ class HfApiClient(
             urlBuilder.append("&filter=").append(URLEncoder.encode(sdkFilter.sdkKey, "UTF-8"))
         }
 
-        val requestBuilder = Request.Builder().url(urlBuilder.toString()).get()
+        val targetUrl = pageUrl?.let { validateNextPageUrl(it) }
+        if (pageUrl != null && targetUrl == null) {
+            return@withContext Result.failure(IllegalArgumentException("Invalid next page address"))
+        }
+        val requestBuilder = Request.Builder().url(targetUrl ?: urlBuilder.toString()).get()
         tokenProvider()?.takeIf { it.isNotBlank() }?.let { token ->
             requestBuilder.header("Authorization", "Bearer $token")
         }
@@ -91,7 +113,7 @@ class HfApiClient(
                     Log.w(TAG, "Fetch live spaces failed: $msg")
                     return@withContext Result.failure(Exception(msg))
                 }
-                val body = response.body?.string() ?: return@withContext Result.success(emptyList())
+                val body = response.body?.string() ?: return@withContext Result.success(SpacePage(emptyList()))
                 val jsonArray = JSONArray(body)
                 val results = mutableListOf<HfSpace>()
 
@@ -102,6 +124,8 @@ class HfApiClient(
                     if (sdkFilter != SpaceSdkFilter.ALL && !space.sdk.equals(sdkFilter.sdkKey, ignoreCase = true)) {
                         continue
                     }
+
+                    if (categoryFilter != SpaceCategoryFilter.ALL && !space.category.equals(categoryFilter.displayName, true)) continue
 
                     when (runtimeFilter) {
                         SpaceRuntimeFilter.RUNNING_ONLY -> {
@@ -120,7 +144,10 @@ class HfApiClient(
 
                     results.add(space)
                 }
-                return@withContext Result.success(results)
+                val next = response.header("Link")?.let {
+                    Regex("<([^>]+)>;\\s*rel=\"next\"").find(it)?.groupValues?.get(1)
+                }?.let(::validateNextPageUrl)
+                return@withContext Result.success(SpacePage(results, next))
             }
         } catch (e: CancellationException) {
             throw e
@@ -130,11 +157,14 @@ class HfApiClient(
         }
     }
 
-    internal fun buildSearchQuery(query: String, categoryFilter: SpaceCategoryFilter): String =
-        listOfNotNull(
-            query.trim().takeIf { it.isNotEmpty() },
-            categoryFilter.id.takeIf { categoryFilter != SpaceCategoryFilter.ALL }
-        ).joinToString(" ")
+    internal fun buildSearchQuery(query: String): String = query.trim()
+
+    internal fun validateNextPageUrl(url: String): String? {
+        val base = "$hubApiBase/spaces".toHttpUrlOrNull() ?: return null
+        val next = url.toHttpUrlOrNull() ?: return null
+        return next.takeIf { it.scheme == base.scheme && it.host == base.host && it.port == base.port &&
+            it.encodedPath == base.encodedPath }?.toString()
+    }
 
     /**
      * Fetches the 1:1 input/output component schema for a Hugging Face Space
@@ -142,56 +172,64 @@ class HfApiClient(
      */
     suspend fun fetchSpaceSchema(space: HfSpace): SpaceSchema = withContext(Dispatchers.IO) {
         val baseHost = spaceEndpointResolver(space.id).trimEnd('/')
-        val candidateUrls = listOf(
-            "$baseHost/gradio_api/info",
-            "$baseHost/info",
-            "$baseHost/config"
-        )
-
-        for (url in candidateUrls) {
-            try {
-                val reqBuilder = Request.Builder().url(url).get()
-                tokenProvider()?.takeIf { it.isNotBlank() }?.let { token ->
-                    reqBuilder.header("Authorization", "Bearer $token")
-                }
-
-                executeRequest(reqBuilder.build()).use { resp ->
-                    if (resp.isSuccessful) {
-                        val body = resp.body?.string() ?: ""
-                        if (body.isNotBlank()) {
-                            val json = JSONObject(body)
-                            if (url.endsWith("/info")) {
-                                val endpoints = parseGradioInfoJson(json)
-                                if (endpoints.isNotEmpty()) {
-                                    return@withContext SpaceSchema(
-                                        spaceId = space.id,
-                                        endpoints = endpoints,
-                                        isLiveFetched = true,
-                                        schemaSourceNote = "1:1 Live Gradio Schema (${endpoints.size} endpoint${if (endpoints.size == 1) "" else "s"})"
-                                    )
-                                }
-                            } else if (url.endsWith("/config")) {
-                                val endpoints = parseGradioConfigJson(json)
-                                if (endpoints.isNotEmpty()) {
-                                    return@withContext SpaceSchema(
-                                        spaceId = space.id,
-                                        endpoints = endpoints,
-                                        isLiveFetched = true,
-                                        schemaSourceNote = "1:1 Live Space Config (${endpoints.size} endpoint${if (endpoints.size == 1) "" else "s"})"
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.d(TAG, "Schema probe failed for $url: ${e.message}")
-            }
+        var apiEndpoints = emptyList<SpaceEndpointSpec>()
+        for (path in listOf("/gradio_api/info", "/info")) {
+            val json = readSpaceJson("$baseHost$path") ?: continue
+            apiEndpoints = parseGradioInfoJson(json)
+            if (apiEndpoints.isNotEmpty()) break
         }
+        // API info describes calls; /config describes the author's tabs, labels and buttons.
+        val configured = readSpaceJson("$baseHost/config")?.let(::parseGradioConfigJson).orEmpty()
+        val endpoints = if (apiEndpoints.isEmpty()) configured else {
+            val order = configured.mapIndexed { index, endpoint -> endpoint.apiName to index }.toMap()
+            apiEndpoints.map { endpoint ->
+                val presentation = configured.firstOrNull { it.apiName == endpoint.apiName }
+                    ?: return@map endpoint
+                endpoint.copy(
+                    tabLabel = presentation.tabLabel,
+                    actionLabel = presentation.actionLabel,
+                    parameters = endpoint.parameters.mapIndexed { index, parameter ->
+                        val control = presentation.parameters.getOrNull(index)
+                            ?.takeIf { presentation.parameters.size == endpoint.parameters.size }
+                            ?: return@mapIndexed parameter
+                        parameter.copy(
+                            label = control.label,
+                            componentName = control.componentName,
+                            description = control.description,
+                            min = parameter.min ?: control.min,
+                            max = parameter.max ?: control.max,
+                            step = parameter.step ?: control.step,
+                            choices = parameter.choices.ifEmpty { control.choices }
+                        )
+                    },
+                    outputs = presentation.outputs.takeIf { it.size == endpoint.outputs.size } ?: endpoint.outputs
+                )
+            }.sortedBy { order[it.apiName] ?: Int.MAX_VALUE }
+        }
+        if (endpoints.isEmpty()) unavailableSchema(space)
+        else SpaceSchema(space.id, endpoints, schemaSourceNote = "Controls loaded from the Space")
+    }
 
-        return@withContext unavailableSchema(space)
+    private suspend fun readSpaceJson(url: String): JSONObject? {
+        return try {
+            val request = Request.Builder().url(url).get().apply {
+                tokenProvider()?.takeIf { it.isNotBlank() }?.let { header("Authorization", "Bearer $it") }
+            }.build()
+            executeRequest(request).use { response ->
+                if (response.isSuccessful) response.body?.string()?.takeIf { it.isNotBlank() }?.let(::JSONObject)
+                else null
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Log.d(TAG, "Space metadata unavailable at $url: ${error.message}")
+            null
+        }
+    }
+
+    suspend fun fetchSpaceDetails(space: HfSpace): HfSpace? = withContext(Dispatchers.IO) {
+        val json = readSpaceJson("$hubApiBase/spaces/${space.id}") ?: return@withContext null
+        parseSpaceJson(json, if (space.isFavorite) setOf(space.id) else emptySet())
     }
 
     internal fun parseGradioInfoJson(root: JSONObject): List<SpaceEndpointSpec> {
@@ -206,18 +244,15 @@ class HfApiClient(
             val params = mutableListOf<SpaceParameterSpec>()
             for (i in 0 until paramsArr.length()) {
                 val pObj = paramsArr.optJSONObject(i) ?: continue
-                val label = pObj.optString("label").ifBlank {
-                    pObj.optString("parameter_name").ifBlank { "Input ${i + 1}" }
-                }
-                val paramName = pObj.optString("parameter_name").ifBlank { "param_$i" }
-                val component = pObj.optString("component").ifBlank { "Textbox" }
+                val label = pObj.textOrNull("label") ?: pObj.textOrNull("parameter_name") ?: "Input ${i + 1}"
+                val paramName = pObj.textOrNull("parameter_name") ?: "param_$i"
+                val component = pObj.textOrNull("component") ?: "Textbox"
                 val hasDefault = pObj.optBoolean("parameter_has_default", false)
                 val defaultRaw = pObj.opt("parameter_default")
                 val defaultStr = if (defaultRaw != null && defaultRaw != JSONObject.NULL) defaultRaw.toString() else ""
 
                 val typeObj = pObj.optJSONObject("type")
                 val pythonTypeObj = pObj.optJSONObject("python_type")
-                val desc = typeObj?.optString("description") ?: pythonTypeObj?.optString("description") ?: ""
 
                 // Extract choices if enum or Literal
                 val choices = mutableListOf<String>()
@@ -273,7 +308,7 @@ class HfApiClient(
                         max = maxVal,
                         step = stepVal,
                         choices = choices,
-                        description = desc
+                        description = ""
                     )
                 )
             }
@@ -317,9 +352,23 @@ class HfApiClient(
             if (id != -1) compMap[id] = c
         }
 
+        val tabLabels = mutableMapOf<Int, String>()
+        fun visitLayout(node: JSONObject, parentTab: String = "") {
+            val id = node.optInt("id", -1)
+            val component = compMap[id]
+            val tab = if (component?.optString("type") in listOf("tab", "tabitem")) {
+                component?.optJSONObject("props")?.optString("label")?.takeIf { it.isNotBlank() } ?: parentTab
+            } else parentTab
+            tabLabels[id] = tab
+            val children = node.optJSONArray("children") ?: return
+            for (index in 0 until children.length()) children.optJSONObject(index)?.let { visitLayout(it, tab) }
+        }
+        root.optJSONObject("layout")?.let { visitLayout(it) }
+
         val endpoints = mutableListOf<SpaceEndpointSpec>()
         for (d in 0 until dependenciesArr.length()) {
             val dep = dependenciesArr.optJSONObject(d) ?: continue
+            if (!dep.optBoolean("backend_fn", true) || dep.optString("api_visibility") == "private") continue
             val inputsArr = dep.optJSONArray("inputs") ?: continue
             val apiName = dep.optString("api_name")
                 .takeIf { it.isNotBlank() && it != "null" && it != "false" }
@@ -334,8 +383,8 @@ class HfApiClient(
                 if (typeStr.equals("state", ignoreCase = true)) continue
 
                 val props = comp.optJSONObject("props")
-                val label = props?.optString("label")?.takeIf { it.isNotBlank() }
-                    ?: props?.optString("placeholder")?.takeIf { it.isNotBlank() }
+                val label = props?.textOrNull("label")
+                    ?: props?.textOrNull("placeholder")
                     ?: "$typeStr #${idx + 1}"
 
                 val defaultVal = props?.opt("value")?.takeIf { it != JSONObject.NULL }?.toString() ?: ""
@@ -381,7 +430,7 @@ class HfApiClient(
                         max = maxVal,
                         step = stepVal,
                         choices = choices,
-                        description = props?.optString("info") ?: ""
+                        description = props?.textOrNull("info").orEmpty()
                     )
                 )
             }
@@ -393,7 +442,7 @@ class HfApiClient(
                     for (o in 0 until outputsArr.length()) {
                         val outComp = compMap[outputsArr.optInt(o, -1)]
                         val outType = outComp?.optString("type", "output") ?: "output"
-                        val outLabel = outComp?.optJSONObject("props")?.optString("label") ?: "Output ${o + 1}"
+                        val outLabel = outComp?.optJSONObject("props")?.textOrNull("label") ?: "Result ${o + 1}"
                         outputs.add(SpaceOutputSpec(outLabel, outType))
                     }
                 }
@@ -401,7 +450,13 @@ class HfApiClient(
                     SpaceEndpointSpec(
                         apiName = apiName.trimStart('/'),
                         parameters = params,
-                        outputs = outputs
+                        outputs = outputs,
+                        tabLabel = dep.optJSONArray("targets")?.optJSONArray(0)?.optInt(0, -1)
+                            ?.let { tabLabels[it] }?.takeIf { it.isNotBlank() }
+                            ?: tabLabels[inputsArr.optInt(0, -1)].orEmpty(),
+                        actionLabel = dep.optJSONArray("targets")?.optJSONArray(0)?.optInt(0, -1)
+                            ?.let { compMap[it] }?.takeIf { it.optString("type") == "button" }
+                            ?.optJSONObject("props")?.textOrNull("value").orEmpty()
                     )
                 )
             }
@@ -409,6 +464,9 @@ class HfApiClient(
 
         return endpoints
     }
+
+    private fun JSONObject.textOrNull(key: String): String? =
+        (opt(key) as? String)?.takeIf { it.isNotBlank() }
 
     private fun JSONObject.nullableFloat(key: String): Float? {
         if (!has(key) || isNull(key)) return null
@@ -924,6 +982,34 @@ class HfApiClient(
             })
         }
 
+    suspend fun saveResultFile(
+        url: String,
+        spaceOrigin: String,
+        openDestination: () -> java.io.OutputStream
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val address = url.toHttpUrlOrNull()
+                ?: throw IllegalArgumentException("The result has no valid download address.")
+            require(address.isHttps) { "The result must use a secure download address." }
+            val origin = spaceOrigin.toHttpUrlOrNull()
+            val request = Request.Builder().url(address).apply {
+                if (origin != null && origin.isHttps && address.host == origin.host && address.port == origin.port) {
+                    tokenProvider()?.takeIf { it.isNotBlank() }?.let { header("Authorization", "Bearer $it") }
+                }
+            }.build()
+            executeRequest(request).use { response ->
+                check(response.isSuccessful) { "Download failed (HTTP ${response.code})." }
+                val body = response.body ?: error("The result file was empty.")
+                openDestination().use { output -> body.byteStream().use { it.copyTo(output) } }
+            }
+            Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
+        }
+    }
+
     private suspend fun querySpaceEndpointWithAnyPayload(
         spaceId: String,
         payloadData: List<Any?>,
@@ -1074,26 +1160,25 @@ class HfApiClient(
         apiName: String = "predict"
     ): Result<String> = querySpaceEndpointWithAnyPayload(spaceId, payloadData, apiName)
 
-    private fun parseSpaceJson(item: JSONObject, favoriteIds: Set<String>): HfSpace? {
+    internal fun parseSpaceJson(item: JSONObject, favoriteIds: Set<String>): HfSpace? {
         val id = item.optString("id")
         if (id.isBlank() || !id.contains("/")) return null
 
         val parts = id.split("/")
-        val author = item.optString("author").ifBlank { parts[0] }
+        val author = item.textOrNull("author") ?: parts[0]
         val name = parts.getOrElse(1) { id }
         val likes = item.optInt("likes", 0)
         val trendingScore = item.optInt("trendingScore", 0)
         val lastModified = item.optString("lastModified", "")
 
         val cardData = item.optJSONObject("cardData")
-        val sdk = item.optString("sdk")
-            .ifBlank { cardData?.optString("sdk") ?: "gradio" }
+        val sdk = item.textOrNull("sdk") ?: cardData?.textOrNull("sdk") ?: "unknown"
 
-        val rawTitle = cardData?.optString("title")?.takeIf { it.isNotBlank() }
+        val rawTitle = cardData?.textOrNull("title")
             ?: name.replace("-", " ").replace("_", " ").replaceFirstChar { it.uppercase() }
 
-        val emoji = cardData?.optString("emoji")?.takeIf { it.isNotBlank() } ?: "🚀"
-        val shortDesc = cardData?.optString("short_description")?.takeIf { it.isNotBlank() }
+        val emoji = cardData?.textOrNull("emoji") ?: "🚀"
+        val shortDesc = cardData?.textOrNull("short_description")
 
         val tagsList = mutableListOf<String>()
         val tagsArray = item.optJSONArray("tags")
@@ -1104,14 +1189,12 @@ class HfApiClient(
             }
         }
 
-        val isZeroGpu = tagsList.any { it.equals("ZeroGPU", ignoreCase = true) }
-
         val runtimeObj = item.optJSONObject("runtime")
-        val runtimeStage = runtimeObj?.optString("stage")?.takeIf { it.isNotBlank() } ?: "RUNNING"
+        val runtimeStage = runtimeObj?.textOrNull("stage") ?: "UNKNOWN"
         val hardwareObj = runtimeObj?.optJSONObject("hardware")
-        val hardwareTier = hardwareObj?.optString("current")?.takeIf { it.isNotBlank() }
-            ?: hardwareObj?.optString("requested")?.takeIf { it.isNotBlank() }
-            ?: if (isZeroGpu) "zero-a10g" else "cpu-basic"
+        val hardwareTier = hardwareObj?.textOrNull("current").orEmpty()
+        val isZeroGpu = hardwareTier.startsWith("zero-", ignoreCase = true) ||
+            tagsList.any { it.equals("ZeroGPU", ignoreCase = true) || it.equals("zero-gpu", ignoreCase = true) }
 
         val combinedText = "$id $rawTitle ${shortDesc ?: ""} ${tagsList.joinToString(" ")}".lowercase()
         val category = when {
@@ -1125,8 +1208,7 @@ class HfApiClient(
             else -> "Text Generation"
         }
 
-        val description = shortDesc
-            ?: "Live $sdk Space by $author • ${if (isZeroGpu) "ZeroGPU accelerated" else hardwareTier}"
+        val description = shortDesc.orEmpty()
 
         return HfSpace(
             id = id,

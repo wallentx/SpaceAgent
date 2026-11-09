@@ -42,6 +42,8 @@ fun SpacesListScreen(
     val selectedSortOption by viewModel.selectedSortOption.collectAsState()
     val isLoadingLiveSpaces by viewModel.isLoadingLiveSpaces.collectAsState()
     val liveSyncStatus by viewModel.liveSyncStatus.collectAsState()
+    val canLoadMore by viewModel.canLoadMoreSpaces.collectAsState()
+    val loadingMore by viewModel.isLoadingMoreSpaces.collectAsState()
 
     val isRunning by viewModel.isTaskRunning.collectAsState()
     val isKeepAlive by viewModel.isKeepAliveActive.collectAsState()
@@ -317,10 +319,15 @@ fun SpacesListScreen(
                             modifier = Modifier.size(48.dp)
                         )
                         Text(
-                            text = "No Spaces matched these filters",
+                            text = if (canLoadMore) "No matches yet" else "No Spaces matched these filters",
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
+                        if (canLoadMore) {
+                            Button(onClick = viewModel::loadMoreSpaces, enabled = !loadingMore) {
+                                Text(if (loadingMore) "Loading…" else "Load more Spaces")
+                            }
+                        }
                         Button(
                             onClick = {
                                 viewModel.setSearchQuery("")
@@ -355,6 +362,12 @@ fun SpacesListScreen(
                             onOpenWeb = { viewModel.openSpaceInWeb(it) },
                             onToggleFavorite = { viewModel.toggleFavorite(it) }
                         )
+                    }
+                    if (canLoadMore) item {
+                        OutlinedButton(onClick = viewModel::loadMoreSpaces, enabled = !loadingMore,
+                            modifier = Modifier.fillMaxWidth().testTag("load_more_spaces")) {
+                            Text(if (loadingMore) "Loading…" else "Load more Spaces")
+                        }
                     }
                 }
             }

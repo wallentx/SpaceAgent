@@ -1,0 +1,74 @@
+{
+  "named_endpoints": {
+    "/upscale_image": {
+      "parameters": [
+        {
+          "label": "Input Image",
+          "parameter_name": "input_img",
+          "parameter_has_default": false,
+          "parameter_default": null,
+          "type": {
+            "type": "object"
+          },
+          "component": "Image"
+        },
+        {
+          "label": "Upscale Factor",
+          "parameter_name": "scale_factor",
+          "parameter_has_default": true,
+          "parameter_default": "4x",
+          "type": {
+            "enum": [
+              "2x",
+              "4x",
+              "8x"
+            ],
+            "type": "string"
+          },
+          "component": "Radio"
+        }
+      ],
+      "returns": [
+        {
+          "label": "Download Upscaled Image",
+          "component": "File"
+        }
+      ]
+    },
+    "/process_video": {
+      "parameters": [
+        {
+          "label": "Input Video",
+          "parameter_name": "input_path",
+          "parameter_has_default": false,
+          "parameter_default": null,
+          "type": {
+            "type": "object"
+          },
+          "component": "Video"
+        },
+        {
+          "label": "Upscale Factor",
+          "parameter_name": "scale_factor",
+          "parameter_has_default": true,
+          "parameter_default": "2x",
+          "type": {
+            "enum": [
+              "2x",
+              "4x",
+              "8x"
+            ],
+            "type": "string"
+          },
+          "component": "Radio"
+        }
+      ],
+      "returns": [
+        {
+          "label": "Upscaled Video",
+          "component": "Video"
+        }
+      ]
+    }
+  }
+}

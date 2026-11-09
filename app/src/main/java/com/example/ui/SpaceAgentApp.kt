@@ -41,7 +41,7 @@ fun SpaceAgentApp(viewModel: SpaceAgentViewModel) {
             .fillMaxSize()
             .testTag("space_agent_main_app"),
         topBar = {
-            TopAppBar(
+            if (currentScreen != AppScreen.WEB_VIEW) TopAppBar(
                 title = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,

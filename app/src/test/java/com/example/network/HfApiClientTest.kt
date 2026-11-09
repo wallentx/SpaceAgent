@@ -100,12 +100,12 @@ class HfApiClientTest {
     }
 
     @Test
-    fun searchCombinesTextAndCategory() {
+    fun searchDoesNotMixLocalCategoryNamesIntoHubNameSearch() {
         val client = HfApiClient { null }
 
         assertEquals(
-            "upscale image-editing",
-            client.buildSearchQuery("  upscale  ", SpaceCategoryFilter.IMAGE_EDIT)
+            "upscale",
+            client.buildSearchQuery("  upscale  ")
         )
     }
 

@@ -65,6 +65,8 @@ enum class SpaceRuntimeFilter(val displayName: String) {
     SAVED("★ Saved")
 }
 
+data class SpacePage(val spaces: List<HfSpace>, val nextPageUrl: String? = null)
+
 enum class StepStatus {
     PENDING,
     RUNNING,
@@ -131,14 +133,21 @@ data class SpaceOutputSpec(
 data class SpaceEndpointSpec(
     val apiName: String,
     val parameters: List<SpaceParameterSpec>,
-    val outputs: List<SpaceOutputSpec> = emptyList()
-)
+    val outputs: List<SpaceOutputSpec> = emptyList(),
+    val tabLabel: String = "",
+    val actionLabel: String = ""
+) {
+    val displayName: String
+        get() = tabLabel.ifBlank { apiName.replace('_', ' ').replace('-', ' ').replaceFirstChar { it.uppercase() } }
+    val submitLabel: String
+        get() = actionLabel.ifBlank { "Run $displayName" }
+}
 
 data class SpaceSchema(
     val spaceId: String,
     val endpoints: List<SpaceEndpointSpec>,
     val isLiveFetched: Boolean = true,
-    val schemaSourceNote: String = "Synced 1:1 from Space Gradio API"
+    val schemaSourceNote: String = "Controls loaded from the Space"
 )
 
 data class SpaceInputValue(
@@ -263,8 +272,8 @@ data class HfSpace(
     val isCurated: Boolean = false,
     val demoPrompt: String = "",
     val emoji: String = "🚀",
-    val runtimeStage: String = "RUNNING",
-    val hardwareTier: String = "cpu-basic",
+    val runtimeStage: String = "UNKNOWN",
+    val hardwareTier: String = "",
     val trendingScore: Int = 0,
     val lastModified: String = "",
     val isZeroGpu: Boolean = false

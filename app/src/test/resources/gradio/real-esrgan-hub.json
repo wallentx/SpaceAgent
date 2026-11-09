@@ -1,0 +1,43 @@
+{
+  "id": "ibyteohdear/Real-ESRGAN-AI-Upscaler",
+  "sdk": "gradio",
+  "likes": 1,
+  "tags": [
+    "gradio",
+    "region:us"
+  ],
+  "author": "ibyteohdear",
+  "cardData": {
+    "title": "Real ESRGAN AI Upscaler",
+    "emoji": "🏆",
+    "colorFrom": "yellow",
+    "colorTo": "pink",
+    "sdk": "gradio",
+    "sdk_version": "6.27.0",
+    "python_version": "3.10",
+    "app_file": "app.py",
+    "pinned": true,
+    "license": "unknown"
+  },
+  "runtime": {
+    "stage": "RUNNING",
+    "hardware": {
+      "current": "zero-a10g",
+      "requested": "zero-a10g"
+    },
+    "gcTimeout": 172800,
+    "replicas": {
+      "current": 1,
+      "requested": 1
+    },
+    "devMode": false,
+    "domains": [
+      {
+        "domain": "ibyteohdear-real-esrgan-ai-upscaler.hf.space",
+        "stage": "READY"
+      }
+    ],
+    "sha": "a799291fe2b2d5a3d04c9e9b2458e3bd0f6aec35",
+    "pySpacesVersion": "0.51.3"
+  }
+}

@@ -77,6 +77,7 @@ class HfTokenStoreTest {
                 assertTrue(rules.contains("sharedpref" to "space_agent_credentials.xml"))
                 assertTrue(rules.contains("sharedpref" to "space_agent_prefs.xml"))
                 assertTrue(rules.contains("database" to "."))
+                assertTrue(rules.contains("root" to "app_webview/"))
             }
         }
     }

@@ -73,6 +73,11 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+val uiScreenshotDirectory = layout.buildDirectory.dir("reports/space-ui")
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+  systemProperty("spaceagent.screenshotDir", uiScreenshotDirectory.get().asFile.absolutePath)
+}
+
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
